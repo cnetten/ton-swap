@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Wallet, Copy, LogOut, MoreVertical } from "lucide-react";
 import { useTonConnectUI } from "../tonconnect/hooks/useTonConnectUI";
 import { useTonAddress } from "../tonconnect/hooks/useTonAddress";
@@ -9,10 +9,7 @@ interface CustomTonConnectButtonProps {
   size?: "sm" | "md" | "lg";
 }
 
-const CustomTonConnectButton: React.FC<CustomTonConnectButtonProps> = ({
-  variant = "default",
-  size = "md",
-}) => {
+const CustomTonConnectButton: React.FC<CustomTonConnectButtonProps> = ({}) => {
   const [showDropdown, setShowDropdown] = useState(false);
   const [tonConnectUI] = useTonConnectUI();
   const userFriendlyAddress = useTonAddress();

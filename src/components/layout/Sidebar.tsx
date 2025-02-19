@@ -1,6 +1,6 @@
 "use client";
 import { cn } from "@/lib/utils";
-import { ArrowLeftRight, Settings, Users } from "lucide-react";
+import { ArrowLeftRight } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import CustomTonConnectButton from "../ui/CustomTonConnectButton";
@@ -21,11 +21,7 @@ export const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
   const [balance, setBalance] = useState<string>("0");
   const userFriendlyAddress = useTonAddress();
 
-  const navigation = [
-    { name: "Swap", href: "/", icon: ArrowLeftRight },
-    // { name: "Users", href: "/users", icon: Users },
-    // { name: "Settings", href: "/settings", icon: Settings },
-  ];
+  const navigation = [{ name: "Swap", href: "/", icon: ArrowLeftRight }];
 
   useEffect(() => {
     const fetchBalance = async () => {

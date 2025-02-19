@@ -1,17 +1,16 @@
 export const DEFAULT_TOKENS: any[] = [
   {
-    contractAddress: "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c",
-    dexPriceUsd: "5.360000000000000",
-    kind: "Ton",
+    contractAddress: "",
+    dexPriceUsd: "0",
+    kind: "",
     meta: {
-      symbol: "TON",
-      displayName: "TON",
-      imageUrl:
-        "https://asset.ston.fi/img/EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c/ee9fb21d17bc8d75c2a5f7b5f5f62d2bacec6b128f58b63cb841e98f7b74c4fc",
+      symbol: "",
+      displayName: "",
+      imageUrl: "",
       decimals: 9,
     },
-    pairPriority: 96,
-    popularityIndex: 1.7976931348623157e308,
+    pairPriority: 0,
+    popularityIndex: 0,
     tags: ["asset:default_symbol", "default_symbol"],
   },
   {

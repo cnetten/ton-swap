@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUpDown } from "lucide-react";
+import { ArrowUpDown, RefreshCw } from "lucide-react";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import { useCallback, useEffect, useState } from "react";
@@ -9,7 +9,21 @@ import { useTheme } from "next-themes";
 import TokenAmountInput from "./TokenAmountInput";
 import { DEFAULT_TOKENS } from "./utils/const";
 import { useQuote } from "@/hooks/useQuote";
-import { fromNano } from "@ton/core";
+import { Address, beginCell, fromNano, toNano } from "@ton/core";
+import { useDebouncedCallback } from "use-debounce";
+import { useTonAddress } from "../tonconnect/hooks/useTonAddress";
+import {
+  VaultJetton,
+  Factory,
+  MAINNET_FACTORY_ADDR,
+  ReadinessStatus,
+  PoolType,
+  Asset,
+  Vault,
+  JettonRoot,
+} from "@dedust/sdk";
+import { TonClient4 } from "@ton/ton";
+import next from "next";
 
 export const SwapInterface = () => {
   const [tonConnectUI] = useTonConnectUI();
@@ -18,17 +32,22 @@ export const SwapInterface = () => {
   const [isSwapping, setIsSwapping] = useState(false);
   const { theme } = useTheme();
   const { getQuote, isLoading, error } = useQuote();
+  const userFriendlyAddress = useTonAddress();
 
   const [state, setState] = useState({
     fromToken: DEFAULT_TOKENS[0],
-    toToken: DEFAULT_TOKENS[1],
+    toToken: DEFAULT_TOKENS[0],
+    rawSimulation: {},
     fromAmount: "",
     toAmount: "",
     priceImpact: "0",
     minAskUnits: "",
     feePercent: "0",
     transaction: [],
+    outPerIn: "0",
+    swapRoute: "",
     protocol: "",
+    receiveAtLeast: "",
   });
 
   useEffect(() => {
@@ -47,37 +66,54 @@ export const SwapInterface = () => {
     };
   }, [tonConnectUI]);
 
-  const handleFromAmountChange = useCallback(
-    async (amount: string) => {
-      setState((prev) => ({ ...prev, fromAmount: amount }));
-      if (amount && state.fromToken && state.toToken) {
-        try {
-          const simulation = await getQuote({
-            fromAddress: state.fromToken.contractAddress,
-            toAddress: state.toToken.contractAddress,
-            amount: amount,
-            slippageTolerance: "0.5",
-          });
+  const debouncedGetQuote = useDebouncedCallback(async (amount: string) => {
+    // Check initial conditions first
+    if (
+      !amount ||
+      !state.fromToken.contractAddress ||
+      !state.toToken.contractAddress
+    ) {
+      setState((prevState) => ({ ...prevState, toAmount: "" }));
+      return;
+    }
 
-          setState((prev) => ({
-            ...prev,
-            toAmount: simulation.quote.askUnits,
-            priceImpact: simulation.priceImpact,
-            minAskUnits: simulation.minAskUnits,
-            feePercent: simulation.quote?.params?.swap?.routes[0]?.gasBudget,
-            transaction: simulation.transaction,
-            protocol:
-              simulation.quote?.params?.swap?.routes[0]?.steps[0]?.chunks[0]
-                ?.protocol,
-          }));
-        } catch (error) {
-          console.error("Failed to simulate swap:", error);
-        }
-      } else {
-        setState((prev) => ({ ...prev, toAmount: "" }));
-      }
+    try {
+      const simulation = await getQuote({
+        fromAddress: state.fromToken.contractAddress,
+        toAddress: state.toToken.contractAddress,
+        amount: amount,
+        slippageTolerance: "0.005",
+      });
+
+      setState((prev) => ({
+        ...prev,
+        rawSimulation: simulation,
+        toAmount: simulation?.swapPaths[0]?.estimatedOutput || "",
+        swapRoute: simulation?.swapPaths[0]?.pathReadable,
+        outPerIn: simulation?.swapPaths[0]?.outPerIn,
+        receiveAtLeast: simulation?.swapPaths[0]?.minimumAmountOut,
+        // priceImpact: simulation.priceImpact,
+        // minAskUnits: simulation.minAskUnits,
+        // feePercent: simulation.quote?.params?.swap?.routes[0]?.gasBudget,
+        // transaction: simulation.transaction,
+        protocol: "DeDust",
+      }));
+    } catch (error) {
+      console.error("Failed to simulate swap:", error);
+      setState((prev) => ({
+        ...prev,
+        toAmount: "",
+        swapRoute: "",
+      }));
+    }
+  }, 500);
+
+  const handleFromAmountChange = useCallback(
+    (amount: string) => {
+      setState((prev) => ({ ...prev, fromAmount: amount }));
+      debouncedGetQuote(amount);
     },
-    [state.fromToken, state.toToken]
+    [debouncedGetQuote]
   );
 
   useEffect(() => {
@@ -90,24 +126,157 @@ export const SwapInterface = () => {
     state.fromToken,
     state.toToken,
   ]);
+  const prepareTonConnectMultiHopSwap = async (tonConnectUI, swapPath) => {
+    const tonClient = new TonClient4({
+      endpoint: "https://mainnet-v4.tonhubapi.com",
+    });
+
+    try {
+      console.log("Input swap path:", swapPath);
+
+      const factory = tonClient.open(
+        Factory.createFromAddress(MAINNET_FACTORY_ADDR)
+      );
+      const firstPool = swapPath.pools[0];
+      const firstToken = swapPath.path[0];
+      // Get the native vault
+      const vault = tonClient.open(await factory.getNativeVault());
+
+      if ((await vault.getReadinessStatus()) !== ReadinessStatus.READY) {
+        throw new Error("Vault not ready");
+      }
+
+      // Calculate amounts
+      const amountIn = toNano(swapPath.inputAmount);
+      const minimumOutput = toNano(swapPath.minimumAmountOut);
+
+      // Create nested pool configuration
+      const buildSwapConfig = (index = 0) => {
+        if (index > swapPath.pools.length - 1) return undefined;
+        console.log(toNano(minimumOutput));
+        return {
+          poolAddress: Address.parse(swapPath.pools[index].address),
+          limit:
+            index === swapPath.pools.length ? toNano(minimumOutput) : undefined,
+          next: buildSwapConfig(index + 1),
+        };
+      };
+
+      let returnSwap;
+
+      if (firstToken === "native") {
+        returnSwap = await vault.sendSwap(
+          {
+            send: async (args) => {
+              await tonConnectUI.sendTransaction({
+                messages: [
+                  {
+                    address: args.to.toString(),
+                    amount: args.value.toString(),
+                    payload: args?.body?.toBoc().toString("base64"),
+                  },
+                ],
+              });
+            },
+          },
+          {
+            amount: amountIn,
+            poolAddress: Address.parse(firstPool.address),
+            // limit: minimumOutput,
+            ...buildSwapConfig(),
+          }
+        );
+      } else {
+        const scaleVault = tonClient.open(
+          await factory.getJettonVault(Address.parse(firstToken))
+        );
+        console.log("Sending swap to vault:", scaleVault);
+
+        const root = tonClient.open(
+          JettonRoot.createFromAddress(Address.parse(firstToken))
+        );
+        console.log("Sending swap to root:", root);
+
+        const wallet = tonClient.open(
+          await root.getWallet(Address.parse(userFriendlyAddress))
+        );
+
+        returnSwap = wallet.sendTransfer(
+          {
+            send: async (args) => {
+              await tonConnectUI.sendTransaction({
+                messages: [
+                  {
+                    address: args.to.toString(),
+                    amount: args.value.toString(),
+                    payload: args?.body?.toBoc().toString("base64"),
+                  },
+                ],
+              });
+            },
+          },
+          toNano(0.3),
+          {
+            amount: amountIn,
+            destination: scaleVault.address,
+            responseAddress: Address.parse(userFriendlyAddress), // return gas to user
+            forwardAmount: toNano("0.2"),
+            forwardPayload: VaultJetton.createSwapPayload({
+              poolAddress: Address.parse(firstPool.address),
+              ...buildSwapConfig(),
+            }),
+          }
+        );
+        console.log(returnSwap);
+      }
+
+      return returnSwap;
+    } catch (error) {
+      console.error("Error preparing swap:", {
+        message: error.message,
+        stack: error.stack,
+        swapPath: JSON.stringify(swapPath, null, 2),
+      });
+      throw error;
+    }
+  };
 
   const handleSwap = async () => {
-    if (!isConnected) {
+    if (!tonConnectUI.connected) {
       await tonConnectUI.openModal();
       return;
     }
 
-    setIsSwapping(true);
     try {
-      const transaction = {
-        validUntil: Math.floor(Date.now() / 1000) + 60 * 20,
-        messages: state.transaction,
-      };
+      setIsSwapping(true);
 
-      await tonConnectUI.sendTransaction(transaction);
-      setState((prev) => ({ ...prev, fromAmount: "", toAmount: "" }));
+      if (!state.rawSimulation?.swapPaths?.[0]) {
+        throw new Error("No valid swap path found");
+      }
+
+      const swapPath = state.rawSimulation.swapPaths[0];
+
+      // Validate path
+      if (!swapPath.pools?.length) {
+        throw new Error("No pools in swap path");
+      }
+
+      console.log("Starting swap:", {
+        path: swapPath.pathReadable,
+        inputAmount: swapPath.inputAmount,
+        minimumAmountOut: swapPath.minimumAmountOut,
+        pools: swapPath.pools.map((p) => ({
+          address: p.address,
+        })),
+      });
+
+      const result = await prepareTonConnectMultiHopSwap(
+        tonConnectUI,
+        swapPath
+      );
+      console.log("Swap initiated:", result);
     } catch (error) {
-      console.error("Swap failed:", error);
+      console.error("Swap failed:", error.message);
     } finally {
       setIsSwapping(false);
     }
@@ -134,6 +303,21 @@ export const SwapInterface = () => {
           <div className="space-y-4">
             <div className="flex justify-between items-center mb-6">
               <div className="text-xl font-bold">Swap</div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  if (state.fromAmount) {
+                    debouncedGetQuote(state.fromAmount);
+                  }
+                }}
+                disabled={!state.fromAmount}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <RefreshCw
+                  className={`h-5 w-5 ${isLoading ? "animate-spin" : ""}`}
+                />
+              </Button>
             </div>
 
             <TokenAmountInput
@@ -142,9 +326,9 @@ export const SwapInterface = () => {
               amount={state.fromAmount}
               balance={state.fromToken?.balance}
               onChange={handleFromAmountChange}
-              onSelectToken={(token) =>
-                setState((prev) => ({ ...prev, fromToken: token }))
-              }
+              onSelectToken={(token) => {
+                setState((prev) => ({ ...prev, fromToken: token }));
+              }}
               walletAddress={address ?? undefined}
               currentTokenAddress={state.toToken?.address}
             />
@@ -188,6 +372,22 @@ export const SwapInterface = () => {
                       theme === "dark" ? "text-gray-400" : "text-gray-500"
                     }
                   >
+                    Route
+                  </span>
+                  <span
+                    className={
+                      theme === "dark" ? "text-gray-300" : "text-gray-700"
+                    }
+                  >
+                    {state.swapRoute}
+                  </span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span
+                    className={
+                      theme === "dark" ? "text-gray-400" : "text-gray-500"
+                    }
+                  >
                     Price Impact
                   </span>
                   <span
@@ -204,6 +404,22 @@ export const SwapInterface = () => {
                       theme === "dark" ? "text-gray-400" : "text-gray-500"
                     }
                   >
+                    Receive at least
+                  </span>
+                  <span
+                    className={
+                      theme === "dark" ? "text-gray-300" : "text-gray-700"
+                    }
+                  >
+                    {state.receiveAtLeast} {state.toToken.meta.symbol}
+                  </span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span
+                    className={
+                      theme === "dark" ? "text-gray-400" : "text-gray-500"
+                    }
+                  >
                     Rate
                   </span>
                   <span
@@ -211,10 +427,7 @@ export const SwapInterface = () => {
                       theme === "dark" ? "text-gray-300" : "text-gray-700"
                     }
                   >
-                    1 {state.fromToken.meta.symbol} ={" "}
-                    {(
-                      parseFloat(state.toAmount) / parseFloat(state.fromAmount)
-                    ).toFixed(6)}{" "}
+                    1 {state.fromToken.meta.symbol} = {state.outPerIn}{" "}
                     {state.toToken.meta.symbol}
                   </span>
                 </div>
@@ -264,17 +477,24 @@ export const SwapInterface = () => {
               onClick={handleSwap}
               disabled={
                 isSwapping ||
-                (!state.fromAmount && !state.toAmount && isConnected) ||
+                !state.fromAmount ||
+                (!state.toAmount && isConnected) ||
+                !state.fromToken ||
+                !state.fromToken.contractAddress ||
+                !state.toToken ||
+                !state.toToken.contractAddress ||
                 !!error ||
                 isLoading
               }
             >
-              {error
+              {error || !state.rawSimulation?.swapPaths?.[0]
                 ? "Failed to find quote"
                 : isSwapping
                 ? "Swapping..."
                 : !isConnected
                 ? "Connect Wallet"
+                : isLoading
+                ? "Loading..."
                 : "Swap"}
             </Button>
           </div>

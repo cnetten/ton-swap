@@ -13,6 +13,7 @@ import { Button } from "../ui/button";
 import Image from "next/image";
 import TokenSelector from "./TokenSelector";
 import { calculatePrice } from "./utils/calculations";
+import { fromNano } from "@ton/core";
 
 interface TokenAmountInputProps {
   token: Token;
@@ -70,7 +71,8 @@ const TokenAmountInput: React.FC<TokenAmountInputProps> = ({
             theme === "dark" ? "text-gray-300" : "text-gray-500"
           }`}
         >
-          <Wallet size={15} className="mr-1" /> {balance ? balance : 0}
+          <Wallet size={15} className="mr-1" />{" "}
+          {balance ? fromNano(balance) : 0}
         </span>
       </div>
       <div className="flex items-center gap-2">
@@ -90,7 +92,7 @@ const TokenAmountInput: React.FC<TokenAmountInputProps> = ({
                 theme === "dark" ? "bg-zinc-800" : ""
               }`}
             >
-              {token ? (
+              {token && token.contractAddress ? (
                 <div className="flex items-center gap-2">
                   <Image
                     src={token?.meta?.imageUrl ? token?.meta?.imageUrl : ""}

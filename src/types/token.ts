@@ -1,6 +1,6 @@
 export interface Token {
   contractAddress: string;
-  kind: "Ton" | "Wton" | "Jetton";
+  kind?: "Ton" | "Wton" | "Jetton";
   balance?: string;
   dexPriceUsd?: string;
   meta?: {

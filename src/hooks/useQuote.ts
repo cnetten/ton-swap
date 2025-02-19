@@ -9,7 +9,7 @@ export const useQuote = () => {
     fromAddress,
     toAddress,
     amount,
-    slippageTolerance = "0.5", // Default 0.5% slippage tolerance
+    slippageTolerance = "0.005", // Default 0.5% slippage tolerance
   }: GetQuoteParams) => {
     try {
       setIsLoading(true);

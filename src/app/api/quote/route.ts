@@ -113,7 +113,7 @@ function buildPoolGraph(filteredPools: Pool[]) {
   return { poolGraph, poolsByPair };
 }
 
-export const filterPoolsByLiquidity = (
+const filterPoolsByLiquidity = (
   pools: Pool[],
   minReserve: number,
   slippageTolerance: number = 0.005

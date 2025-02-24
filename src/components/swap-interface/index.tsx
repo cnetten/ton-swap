@@ -9,7 +9,7 @@ import { useTheme } from "next-themes";
 import TokenAmountInput from "./TokenAmountInput";
 import { DEFAULT_TOKENS } from "./utils/const";
 import { useQuote } from "@/hooks/useQuote";
-import { Address, fromNano, toNano } from "@ton/core";
+import { Address, toNano } from "@ton/core";
 import { useDebouncedCallback } from "use-debounce";
 import { useTonAddress } from "../tonconnect/hooks/useTonAddress";
 import {

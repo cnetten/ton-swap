@@ -96,7 +96,7 @@ export const SwapInterface = () => {
         // minAskUnits: simulation.minAskUnits,
         // feePercent: simulation.quote?.params?.swap?.routes[0]?.gasBudget,
         // transaction: simulation.transaction,
-        protocol: "DeDust",
+        protocol: simulation?.swapPaths[0]?.source,
       }));
     } catch (error) {
       console.error("Failed to simulate swap:", error);

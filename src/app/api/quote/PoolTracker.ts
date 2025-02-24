@@ -2,6 +2,7 @@ import { TonClient4, Address } from "@ton/ton";
 import { MongoClient, Collection } from "mongodb";
 import { EventEmitter } from "events";
 import { DeDustClient } from "@dedust/sdk";
+import { StonApiClient } from "@ston-fi/api";
 
 interface TokenMetadata {
   name: string;
@@ -28,6 +29,41 @@ interface Pool {
     fees: string[];
     volume: string[];
   };
+  source?: string; // Add source field to track where the pool comes from
+  lastUpdateTimestamp?: number;
+}
+
+// Add interface for StonFi Pool structure
+interface StonFiPool {
+  address: string;
+  apy_1d: string;
+  apy_30d: string;
+  apy_7d: string;
+  collected_token0_protocol_fee: string;
+  collected_token1_protocol_fee: string;
+  deprecated: boolean;
+  lp_account_address: string;
+  lp_balance: string;
+  lp_fee: string;
+  lp_price_usd: string;
+  lp_total_supply: string;
+  lp_total_supply_usd: string;
+  lp_wallet_address: string;
+  popularity_index: number;
+  protocol_fee: string;
+  protocol_fee_address: string;
+  ref_fee: string;
+  reserve0: string;
+  reserve1: string;
+  router_address: string;
+  token0_address: string;
+  token0_balance: string;
+  token1_address: string;
+  token1_balance: string;
+}
+
+interface StonFiPoolsResponse {
+  pool_list: StonFiPool[];
 }
 
 class PoolTracker extends EventEmitter {
@@ -36,7 +72,7 @@ class PoolTracker extends EventEmitter {
   private poolAddresses: Set<string>;
   private isTracking: boolean = false;
   private trackingInterval: NodeJS.Timeout | null = null;
-  private readonly TRACK_INTERVAL = 5000; // 1 second
+  private readonly TRACK_INTERVAL = 5000; // 5 seconds
   private mongoClient: MongoClient | null = null;
 
   constructor(
@@ -58,6 +94,7 @@ class PoolTracker extends EventEmitter {
       // Create indexes
       await this.db.createIndex({ address: 1 }, { unique: true });
       await this.db.createIndex({ lastUpdateTimestamp: 1 });
+      await this.db.createIndex({ source: 1 }); // Index for source field
 
       console.log("Connected to MongoDB successfully");
     } catch (error) {
@@ -128,25 +165,108 @@ class PoolTracker extends EventEmitter {
     }
   }
 
+  // Function to convert StonFi pool data to our Pool format
+  private convertStonFiPool(stonfiPool: StonFiPool): Pool {
+    // Create token metadata for token0 and token1
+    // Note: In a real implementation, you'd likely fetch token metadata from a registry
+    const token0Metadata: TokenMetadata = {
+      name: "Unknown Token 0",
+      symbol: "UNK0",
+      decimals: 9, // Default decimals for TON tokens
+    };
+
+    const token1Metadata: TokenMetadata = {
+      name: "Unknown Token 1",
+      symbol: "UNK1",
+      decimals: 9,
+    };
+
+    // Create token assets
+    const assets: TokenAsset[] = [
+      {
+        type: "token",
+        address: stonfiPool.token0_address,
+        metadata: token0Metadata,
+      },
+      {
+        type: "token",
+        address: stonfiPool.token1_address,
+        metadata: token1Metadata,
+      },
+    ];
+
+    // Create Pool object
+    return {
+      address: stonfiPool.address,
+      lt: "0", // Default value
+      totalSupply: stonfiPool.lp_total_supply,
+      type: "stonfi", // Mark as StonFi pool
+      tradeFee: stonfiPool.lp_fee,
+      assets: assets,
+      lastPrice: {
+        // You may calculate this based on reserves
+        value: "0",
+      },
+      reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
+      stats: {
+        fees: [
+          stonfiPool.collected_token0_protocol_fee,
+          stonfiPool.collected_token1_protocol_fee,
+        ],
+        volume: ["0", "0"], // Default values
+      },
+      source: "stonfi", // Mark source as StonFi
+      lastUpdateTimestamp: Date.now(),
+    };
+  }
+
   async startTracking(): Promise<void> {
     if (this.isTracking) return;
     const dedustSDK = new DeDustClient({
       endpointUrl: "https://api.dedust.io",
     });
 
+    const stonfiClient = new StonApiClient();
+
     this.isTracking = true;
     this.trackingInterval = setInterval(async () => {
       try {
-        // Fetch all pools from Dedust SDK
-        const pools = await dedustSDK.getPools();
+        // Fetch pools from DeDust
+        const dedustPools = await dedustSDK.getPools();
+        // Add source field to track the origin
+        const taggedDedustPools = dedustPools.map((pool) => ({
+          ...pool,
+          source: "dedust",
+          lastUpdateTimestamp: Date.now(),
+        }));
+
+        // Fetch pools from StonFi
+        const stonfiResponse = await stonfiClient.getPools();
+        let stonfiPools: Pool[] = [];
+
+        // Check if the response matches expected structure
+        if (stonfiResponse) {
+          console.log("getting here");
+          // Convert StonFi pools to our format
+          stonfiPools = stonfiResponse.map((pool) =>
+            this.convertStonFiPool(pool)
+          );
+        } else {
+          console.error("Unexpected StonFi response format:");
+        }
+
+        // Combine pools from both sources
+        const allPools = [...taggedDedustPools, ...stonfiPools];
 
         // Update all pools in a single bulk operation
-        await this.updateBulkPoolStates(pools);
-        console.log(`Updated ${pools.length} pools`);
+        await this.updateBulkPoolStates(allPools);
+        console.log(
+          `Updated ${taggedDedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
+        );
       } catch (error) {
         console.error("Pools update error:", error);
       }
-    }, 15000); // Update every 30 seconds
+    }, 15000); // Update every 15 seconds
   }
 
   async stopTracking(): Promise<void> {
@@ -166,6 +286,14 @@ class PoolTracker extends EventEmitter {
       await this.connect();
     }
     return await this.db!.find({}).toArray();
+  }
+
+  // Get pools by source
+  async getPoolsBySource(source: string): Promise<Pool[]> {
+    if (!this.db) {
+      await this.connect();
+    }
+    return await this.db!.find({ source }).toArray();
   }
 
   async disconnect(): Promise<void> {
@@ -211,6 +339,11 @@ class PoolService {
 
   async getPools(): Promise<Pool[]> {
     return await this.tracker.getAllPools();
+  }
+
+  // Get pools by source
+  async getPoolsBySource(source: string): Promise<Pool[]> {
+    return await this.tracker.getPoolsBySource(source);
   }
 
   async cleanup(): Promise<void> {

@@ -23,6 +23,22 @@ interface Pool {
     fees: string[];
     volume: string[];
   };
+  source?: string; // Track source of the pool (dedust/stonfi)
+}
+
+interface PathWithCost {
+  path: string[];
+  pathReadable: string;
+  pools: Pool[];
+  outputAmount: string;
+  estimatedOutput: string;
+  inputAmount: string;
+  minimumAmountOut: number;
+  estimatedGasFees: number;
+  outPerIn: string;
+  pathDepth: number;
+  outPutMint: string;
+  source?: string; // Source exchange (dedust/stonfi)
 }
 
 function getTokenDecimals(tokenId: string, pools: Pool[]): number {
@@ -143,18 +159,141 @@ export const filterPoolsByLiquidity = (
       return false;
     }
 
-    // Check trading activity
-    const totalVolume = pool.stats.volume
-      .map((v) => parseFloat(v) || 0)
-      .reduce((a, b) => a + b, 0);
+    // Check trading activity - only if it's DeDust pools as StonFi might not have this data structure
+    if (pool.source === "dedust" || !pool.source) {
+      const totalVolume = pool.stats.volume
+        .map((v) => parseFloat(v) || 0)
+        .reduce((a, b) => a + b, 0);
 
-    if (totalVolume === 0) {
-      return false;
+      if (totalVolume === 0) {
+        return false;
+      }
     }
 
     return true;
   });
 };
+
+// Process and find best paths for each exchange source separately
+async function findBestPathsBySource(
+  fromAddress: string,
+  toAddress: string,
+  amountWithDecimals: string,
+  slippageDecimal: number
+): Promise<{
+  bestDedustPath: PathWithCost | null;
+  bestStonfiPath: PathWithCost | null;
+  allFilteredPools: Pool[];
+}> {
+  const poolService = PoolService.getInstance();
+  console.log("Fetching pools from all sources...");
+
+  // Get pools from different sources
+  const dedustPools = await poolService.getPoolsBySource("dedust");
+  const stonfiPools = await poolService.getPoolsBySource("stonfi");
+
+  console.log(
+    `Found ${dedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
+  );
+
+  // Process pools by source
+  const minLiquidity = 100000;
+
+  // Filter pools for each source
+  const filteredDedustPools = filterPoolsByLiquidity(
+    dedustPools,
+    minLiquidity,
+    slippageDecimal
+  );
+  const filteredStonfiPools = filterPoolsByLiquidity(
+    stonfiPools,
+    minLiquidity,
+    slippageDecimal
+  );
+
+  console.log(
+    `After filtering: ${filteredDedustPools.length} DeDust pools and ${filteredStonfiPools.length} StonFi pools`
+  );
+
+  let bestDedustPath: PathWithCost | null = null;
+  let bestStonfiPath: PathWithCost | null = null;
+
+  // Find best path for DeDust pools
+  if (filteredDedustPools.length > 0) {
+    const { poolGraph: dedustGraph, poolsByPair: dedustPoolsByPair } =
+      buildPoolGraph(filteredDedustPools);
+
+    console.log("Finding swap paths for DeDust pools...");
+    const dedustPaths = await findSwapPathsParallel(
+      dedustGraph,
+      dedustPoolsByPair,
+      fromAddress,
+      toAddress,
+      amountWithDecimals,
+      4, // maxDepth
+      1 // maxPaths
+    );
+
+    if (dedustPaths.length > 0) {
+      bestDedustPath = { ...dedustPaths[0], source: "dedust" };
+      console.log(
+        `Found best DeDust path with output: ${bestDedustPath.outputAmount}`
+      );
+    }
+  }
+
+  // Find best path for StonFi pools
+  if (filteredStonfiPools.length > 0) {
+    const { poolGraph: stonfiGraph, poolsByPair: stonfiPoolsByPair } =
+      buildPoolGraph(filteredStonfiPools);
+
+    console.log("Finding swap paths for StonFi pools...");
+    const stonfiPaths = await findSwapPathsParallel(
+      stonfiGraph,
+      stonfiPoolsByPair,
+      fromAddress,
+      toAddress,
+      amountWithDecimals,
+      4, // maxDepth
+      1 // maxPaths
+    );
+
+    if (stonfiPaths.length > 0) {
+      bestStonfiPath = { ...stonfiPaths[0], source: "stonfi" };
+      console.log(
+        `Found best StonFi path with output: ${bestStonfiPath.outputAmount}`
+      );
+    }
+  }
+
+  // Combine all filtered pools for reference
+  const allFilteredPools = [...filteredDedustPools, ...filteredStonfiPools];
+
+  return { bestDedustPath, bestStonfiPath, allFilteredPools };
+}
+
+// Compare and select the best path overall
+function selectBestPath(
+  dedustPath: PathWithCost | null,
+  stonfiPath: PathWithCost | null
+): PathWithCost | null {
+  if (!dedustPath && !stonfiPath) {
+    return null;
+  }
+
+  if (!dedustPath) return stonfiPath;
+  if (!stonfiPath) return dedustPath;
+
+  // Compare output amounts to determine which is better
+  const dedustOutput = BigInt(dedustPath.outputAmount);
+  const stonfiOutput = BigInt(stonfiPath.outputAmount);
+
+  console.log(
+    `Comparing outputs - DeDust: ${dedustOutput}, StonFi: ${stonfiOutput}`
+  );
+
+  return dedustOutput >= stonfiOutput ? dedustPath : stonfiPath;
+}
 
 export async function POST(req: Request) {
   if (!initialized) {
@@ -163,6 +302,7 @@ export async function POST(req: Request) {
     // Wait a bit for initial data
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
+
   try {
     const { fromAddress, toAddress, amount, slippageTolerance } =
       await req.json();
@@ -189,90 +329,90 @@ export async function POST(req: Request) {
     const amountInteger = Math.floor(amountNumber * 1e9);
     const amountWithDecimals = BigInt(amountInteger).toString();
 
-    // const poolProcessor = new PoolProcessor();
-    const poolService = PoolService.getInstance();
-
-    console.log("Fetching pools...");
-    // const allPools = await poolProcessor.getAndProcessPools({
-    //   minLiquidity: 1000000,
-    //   maxTradeFee: 0.5,
-    //   batchSize: 50,
-    // });
-    const allPools = await poolService.getPools();
     // Convert slippageTolerance to decimal (e.g., 0.5 -> 0.005)
     const slippageDecimal = (slippageTolerance || 0.5) / 100;
     console.log(`Using slippage tolerance: ${slippageDecimal * 100}%`);
 
-    // Filter pools based on liquidity and slippage
-    const filteredPools = filterPoolsByLiquidity(
-      allPools,
-      100000,
-      slippageDecimal
-    );
-    console.log(
-      `Fetched ${allPools.length} pools, filtered to ${filteredPools.length} based on liquidity and slippage`
-    );
+    // Find best paths for each exchange separately
+    const { bestDedustPath, bestStonfiPath, allFilteredPools } =
+      await findBestPathsBySource(
+        actualFromAddress,
+        actualToAddress,
+        amountWithDecimals,
+        slippageDecimal
+      );
 
-    // Build pool graph after filtering
-    const { poolGraph, poolsByPair } = buildPoolGraph(filteredPools);
-    // await refreshRelevantPools(
-    //   poolGraph,
-    //   poolsByPair,
-    //   actualFromAddress,
-    //   actualToAddress,
-    //   poolService
-    // );
-    console.log("Finding swap paths...");
-    // const swapPaths = findAllSwapPathsOptimized(
-    //   poolGraph,
-    //   poolsByPair,
-    //   actualFromAddress,
-    //   actualToAddress,
-    //   amountWithDecimals
-    // );
-    const swapPaths = await findSwapPathsParallel(
-      poolGraph,
-      poolsByPair,
-      actualFromAddress,
-      actualToAddress,
-      amountWithDecimals,
-      4, // maxDepth
-      1 // maxPaths
-    );
+    // Select the best path overall
+    const bestPath = selectBestPath(bestDedustPath, bestStonfiPath);
 
-    console.log(`Found ${swapPaths.length} valid paths`);
-
-    if (swapPaths.length === 0) {
+    if (!bestPath) {
       return NextResponse.json({
         error: "No valid swap paths found",
         swapPaths: [],
+        exchangeComparison: {
+          dedust: bestDedustPath
+            ? {
+                outputAmount: bestDedustPath.outputAmount,
+                pathDepth: bestDedustPath.pathDepth,
+              }
+            : null,
+          stonfi: bestStonfiPath
+            ? {
+                outputAmount: bestStonfiPath.outputAmount,
+                pathDepth: bestStonfiPath.pathDepth,
+              }
+            : null,
+        },
       });
     }
 
-    return NextResponse.json({
-      swapPaths: swapPaths.map((path) => {
-        const fromDecimals = getTokenDecimals(actualFromAddress, path.pools);
-        const toDecimals = getTokenDecimals(actualToAddress, path.pools);
+    // Format the result
+    const fromDecimals = getTokenDecimals(actualFromAddress, bestPath.pools);
+    const toDecimals = getTokenDecimals(actualToAddress, bestPath.pools);
 
-        return {
-          path: path.path,
-          pathReadable: path.pathReadable,
-          outPutMint: toAddress,
-          pools: path.pools,
-          estimatedOutput: normalizeAmount(path.outputAmount, toDecimals),
-          inputAmount: normalizeAmount(path.inputAmount, fromDecimals),
-          minimumAmountOut:
-            Number(normalizeAmount(path.outputAmount, toDecimals)) -
-            Number(normalizeAmount(path.outputAmount, toDecimals)) *
-              slippageDecimal,
-          estimatedGasFees: 0,
-          outPerIn: (
-            Number(normalizeAmount(path.outputAmount, toDecimals)) /
-            Number(normalizeAmount(path.inputAmount, fromDecimals))
-          ).toFixed(9),
-          pathDepth: path.pathDepth + 1,
-        };
-      }),
+    const formattedPath = {
+      path: bestPath.path,
+      pathReadable: bestPath.pathReadable,
+      outPutMint: toAddress,
+      pools: bestPath.pools,
+      estimatedOutput: normalizeAmount(bestPath.outputAmount, toDecimals),
+      inputAmount: normalizeAmount(bestPath.inputAmount, fromDecimals),
+      minimumAmountOut:
+        Number(normalizeAmount(bestPath.outputAmount, toDecimals)) -
+        Number(normalizeAmount(bestPath.outputAmount, toDecimals)) *
+          slippageDecimal,
+      estimatedGasFees: 0,
+      outPerIn: (
+        Number(normalizeAmount(bestPath.outputAmount, toDecimals)) /
+        Number(normalizeAmount(bestPath.inputAmount, fromDecimals))
+      ).toFixed(9),
+      pathDepth: bestPath.pathDepth + 1,
+      source: bestPath.source, // Include the source in the result
+    };
+
+    return NextResponse.json({
+      swapPaths: [formattedPath],
+      exchangeComparison: {
+        dedust: bestDedustPath
+          ? {
+              outputAmount: normalizeAmount(
+                bestDedustPath.outputAmount,
+                toDecimals
+              ),
+              pathDepth: bestDedustPath.pathDepth,
+            }
+          : null,
+        stonfi: bestStonfiPath
+          ? {
+              outputAmount: normalizeAmount(
+                bestStonfiPath.outputAmount,
+                toDecimals
+              ),
+              pathDepth: bestStonfiPath.pathDepth,
+            }
+          : null,
+        bestExchange: bestPath.source,
+      },
     });
   } catch (error: any) {
     console.error("Error in POST handler:", error);

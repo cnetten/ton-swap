@@ -188,11 +188,15 @@ async function findBestPathsBySource(
   allFilteredPools: Pool[];
 }> {
   const poolService = PoolService.getInstance();
+  const tracker = poolService.getTracker();
+
   console.log("Fetching pools from all sources...");
 
   // Get pools from different sources
-  const dedustPools = await poolService.getPoolsBySource("dedust");
-  const stonfiPools = await poolService.getPoolsBySource("stonfi");
+  const [dedustPools, stonfiPools] = await Promise.all([
+    poolService.getPoolsBySource("dedust"),
+    poolService.getPoolsBySource("stonfi"),
+  ]);
 
   console.log(
     `Found ${dedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
@@ -202,15 +206,16 @@ async function findBestPathsBySource(
   const minLiquidity = 100000;
 
   // Filter pools for each source
-  const filteredDedustPools = filterPoolsByLiquidity(
-    dedustPools,
+  const filteredDedustPools = tracker.filterPoolsByLiquidity(
+    "dedust",
     minLiquidity,
-    slippageDecimal
+    0.5
   );
-  const filteredStonfiPools = filterPoolsByLiquidity(
-    stonfiPools,
+
+  const filteredStonfiPools = tracker.filterPoolsByLiquidity(
+    "stonfi",
     minLiquidity,
-    slippageDecimal
+    0.5
   );
 
   console.log(

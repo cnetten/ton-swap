@@ -79,17 +79,26 @@ class PoolTracker extends EventEmitter {
 
   constructor(
     private readonly tonEndpoint: string = "https://mainnet-v4.tonhubapi.com",
-    private readonly mongoUri: string = "mongodb://localhost:27017/ton_pools"
+    private readonly mongoUri: string = process.env.MONGO_CONNECTION
   ) {
     super();
     this.tonClient = new TonClient4({ endpoint: tonEndpoint });
     this.poolAddresses = new Set();
   }
 
+  private inMemoryPools: Map<string, Pool[]> = new Map();
+  private lastUpdateTime: Map<string, number> = new Map();
+
   async connect(): Promise<void> {
     if (this.db) return;
     try {
-      this.mongoClient = await MongoClient.connect(this.mongoUri);
+      this.mongoClient = await MongoClient.connect(this.mongoUri, {
+        maxPoolSize: 50, // Maximum number of connections in the pool
+        minPoolSize: 5, // Minimum number of connections to maintain
+        maxIdleTimeMS: 30000, // How long a connection can remain idle before being removed
+        connectTimeoutMS: 10000, // Connection timeout
+        socketTimeoutMS: 45000, // Socket timeout
+      });
       const db = this.mongoClient.db();
       this.db = db.collection("pool_states");
 
@@ -97,7 +106,11 @@ class PoolTracker extends EventEmitter {
       await this.db.createIndex({ address: 1 }, { unique: true });
       await this.db.createIndex({ lastUpdateTimestamp: 1 });
       await this.db.createIndex({ source: 1 }); // Index for source field
-
+      await this.db.createIndex({ source: 1, type: 1 }, { background: true });
+      await this.db.createIndex(
+        { source: 1, lastUpdateTimestamp: -1 },
+        { background: true }
+      );
       console.log("Connected to MongoDB successfully");
     } catch (error) {
       console.error("Failed to connect to MongoDB:", error);
@@ -146,7 +159,44 @@ class PoolTracker extends EventEmitter {
   public async updateBulkPoolStates(pools: Pool[]): Promise<void> {
     if (pools.length === 0) return;
 
-    // Bulk write operation for much faster updates
+    // Group pools by source
+    const poolsBySource = new Map<string, Pool[]>();
+    for (const pool of pools) {
+      if (pool.source) {
+        if (!poolsBySource.has(pool.source)) {
+          poolsBySource.set(pool.source, []);
+        }
+        poolsBySource.get(pool.source)!.push(pool);
+      }
+    }
+
+    // Update in-memory pools for each source
+    for (const [source, sourcePools] of poolsBySource.entries()) {
+      // Get current pools for this source (or empty array)
+      const currentPools = this.inMemoryPools.get(source) || [];
+
+      // Create map for fast lookup of existing pools
+      const poolMap = new Map<string, Pool>();
+      for (const pool of currentPools) {
+        poolMap.set(pool.address, pool);
+      }
+
+      // Update existing or add new pools
+      for (const pool of sourcePools) {
+        poolMap.set(pool.address, pool);
+      }
+
+      // Convert back to array and store
+      const updatedPools = Array.from(poolMap.values());
+      this.inMemoryPools.set(source, updatedPools);
+      this.lastUpdateTime.set(source, Date.now());
+
+      console.log(
+        `Updated in-memory ${source} pools: ${updatedPools.length} total`
+      );
+    }
+
+    // Proceed with database update
     const bulkOps = pools.map((pool) => ({
       updateOne: {
         filter: { address: pool.address },
@@ -157,8 +207,7 @@ class PoolTracker extends EventEmitter {
 
     try {
       await this.db.bulkWrite(bulkOps, { ordered: false });
-
-      // Emit events in a separate non-blocking process
+      // Emit events
       setImmediate(() => {
         pools.forEach((pool) => this.emit("poolStateUpdated", pool));
       });
@@ -299,14 +348,117 @@ class PoolTracker extends EventEmitter {
 
   // Get pools by source
   async getPoolsBySource(source: string): Promise<Pool[]> {
+    // Initialize database connection if needed
     if (!this.db) {
       await this.connect();
     }
-    const results = await this.db!.find({ source }).toArray();
 
+    // Check if we have in-memory pools for this source
+    if (this.inMemoryPools.has(source)) {
+      const pools = this.inMemoryPools.get(source)!;
+      const lastUpdate = this.lastUpdateTime.get(source) || 0;
+      const ageInSeconds = (Date.now() - lastUpdate) / 1000;
+
+      console.log(
+        `Using ${
+          pools.length
+        } in-memory ${source} pools (${ageInSeconds.toFixed(1)}s old)`
+      );
+      return pools;
+    }
+
+    // If not in memory, load from database
+    console.log(`No in-memory pools for ${source}, loading from database...`);
+    const startTime = Date.now();
+
+    const results = await this.db!.find({ source }).toArray();
     const pools = results.map((doc) => doc as unknown as Pool);
 
+    // Store in memory for future use
+    this.inMemoryPools.set(source, pools);
+    this.lastUpdateTime.set(source, Date.now());
+
+    console.log(
+      `Loaded ${pools.length} ${source} pools from database in ${
+        Date.now() - startTime
+      }ms`
+    );
     return pools;
+  }
+
+  // Add this utility method to filter pools in memory
+  public filterPoolsByLiquidity(
+    source: string,
+    minReserve: number,
+    maxTradeFee: number
+  ): Pool[] {
+    // Get pools for this source
+    const pools = this.inMemoryPools.get(source) || [];
+
+    const startTime = Date.now();
+    const filteredPools = pools.filter((pool) => {
+      // Basic pool validation
+      if (!pool?.assets?.length || !pool?.reserves?.length || !pool?.stats) {
+        return false;
+      }
+
+      // Check trade fee
+      const tradeFee = parseFloat(pool.tradeFee || "0");
+      if (tradeFee > maxTradeFee) {
+        return false;
+      }
+
+      // Validate pool structure
+      if (pool.assets.length !== 2 || pool.reserves.length !== 2) {
+        return false;
+      }
+
+      // Validate assets
+      for (const asset of pool.assets) {
+        if (asset.type === "native") continue;
+        if (
+          !asset.metadata?.symbol ||
+          asset.metadata?.name?.includes("Stake")
+        ) {
+          return false;
+        }
+      }
+
+      // Validate reserves
+      try {
+        const [reserve1, reserve2] = pool.reserves.map((r) => parseFloat(r));
+        if (
+          isNaN(reserve1) ||
+          isNaN(reserve2) ||
+          reserve1 < minReserve ||
+          reserve2 < minReserve
+        ) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+
+      // Check trading activity (DeDust specific)
+      if (source === "dedust") {
+        const totalVolume = pool.stats.volume
+          .map((v) => parseFloat(v) || 0)
+          .reduce((a, b) => a + b, 0);
+
+        if (totalVolume === 0) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    console.log(
+      `Filtered ${pools.length} ${source} pools to ${filteredPools.length} in ${
+        Date.now() - startTime
+      }ms`
+    );
+    return filteredPools;
   }
 
   async disconnect(): Promise<void> {
@@ -356,6 +508,10 @@ class PoolService {
   // Get pools by source
   async getPoolsBySource(source: string): Promise<Pool[]> {
     return await this.tracker.getPoolsBySource(source);
+  }
+
+  public getTracker(): PoolTracker {
+    return this.tracker;
   }
 
   async cleanup(): Promise<void> {

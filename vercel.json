@@ -1,6 +1,6 @@
 {
   "functions": {
-    "/api/quote": {
+    "src/app/api/quote": {
       "maxDuration": 60
     }
   }

@@ -345,7 +345,7 @@ export async function POST(req: Request) {
 
     // Convert amount to proper decimal representation (assuming 9 decimals)
     const amountNumber = Number(amount);
-    const amountInteger = Math.floor(amountNumber * Math.pow(10, fromDecimals));
+    const amountInteger = Math.floor(amountNumber * 10 ** fromDecimals);
     const amountWithDecimals = BigInt(amountInteger).toString();
 
     // Convert slippageTolerance to decimal (e.g., 0.5 -> 0.005)

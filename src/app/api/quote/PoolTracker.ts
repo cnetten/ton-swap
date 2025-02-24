@@ -95,9 +95,6 @@ class PoolTracker extends EventEmitter {
       this.mongoClient = await MongoClient.connect(this.mongoUri, {
         maxPoolSize: 50, // Maximum number of connections in the pool
         minPoolSize: 5, // Minimum number of connections to maintain
-        maxIdleTimeMS: 30000, // How long a connection can remain idle before being removed
-        connectTimeoutMS: 10000, // Connection timeout
-        socketTimeoutMS: 45000, // Socket timeout
       });
       const db = this.mongoClient.db();
       this.db = db.collection("pool_states");

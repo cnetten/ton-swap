@@ -9,7 +9,7 @@ import { useTheme } from "next-themes";
 import TokenAmountInput from "./TokenAmountInput";
 import { DEFAULT_TOKENS } from "./utils/const";
 import { useQuote } from "@/hooks/useQuote";
-import { Address, beginCell, fromNano, toNano } from "@ton/core";
+import { Address, fromNano, toNano } from "@ton/core";
 import { useDebouncedCallback } from "use-debounce";
 import { useTonAddress } from "../tonconnect/hooks/useTonAddress";
 import {
@@ -17,13 +17,9 @@ import {
   Factory,
   MAINNET_FACTORY_ADDR,
   ReadinessStatus,
-  PoolType,
-  Asset,
-  Vault,
   JettonRoot,
 } from "@dedust/sdk";
 import { TonClient4 } from "@ton/ton";
-import next from "next";
 
 export const SwapInterface = () => {
   const [tonConnectUI] = useTonConnectUI();
@@ -382,7 +378,7 @@ export const SwapInterface = () => {
                     {state.swapRoute}
                   </span>
                 </div>
-                <div className="flex justify-between text-sm">
+                {/* <div className="flex justify-between text-sm">
                   <span
                     className={
                       theme === "dark" ? "text-gray-400" : "text-gray-500"
@@ -397,7 +393,7 @@ export const SwapInterface = () => {
                   >
                     {state.priceImpact}%
                   </span>
-                </div>
+                </div> */}
                 <div className="flex justify-between text-sm">
                   <span
                     className={
@@ -432,7 +428,7 @@ export const SwapInterface = () => {
                   </span>
                 </div>
 
-                <div className="flex justify-between text-sm">
+                {/* <div className="flex justify-between text-sm">
                   <span
                     className={
                       theme === "dark" ? "text-gray-400" : "text-gray-500"
@@ -448,7 +444,7 @@ export const SwapInterface = () => {
                     {fromNano(state.feePercent)}
                     {" TON"}
                   </span>
-                </div>
+                </div> */}
                 <div className="flex justify-between text-sm">
                   <span
                     className={

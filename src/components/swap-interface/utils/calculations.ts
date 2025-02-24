@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { Token } from "@/types/token";
 import { fromNano, toNano } from "@ton/core";
 

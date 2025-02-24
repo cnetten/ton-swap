@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import { CHAIN, toUserFriendlyAddress } from "@tonconnect/ui";
 import { useTonWallet } from "./useTonWallet";
 import { useMemo } from "react";

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { CSSProperties, FunctionComponent, memo, useEffect } from "react";
 import { useTonConnectUI } from "./hooks/useTonConnectUI";
 

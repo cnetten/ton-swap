@@ -9,6 +9,7 @@ export interface Pool {
   assets: Array<{
     type: string;
     address?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     metadata: any;
   }>;
   lastPrice: string;

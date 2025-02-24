@@ -17,6 +17,7 @@ export async function findSwapPathsParallel(
     if (startNodes.length === 0) return [];
 
     // Prepare data for workers
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serializedGraph: any = {};
     for (const [key, value] of graph.entries()) {
       serializedGraph[key] = Object.fromEntries(value);

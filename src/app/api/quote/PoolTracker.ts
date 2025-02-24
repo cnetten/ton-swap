@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { TonClient4, Address } from "@ton/ton";
 import { MongoClient, Collection } from "mongodb";
 import { EventEmitter } from "events";
@@ -141,7 +143,7 @@ class PoolTracker extends EventEmitter {
     this.emit("poolStateUpdated", pool);
   }
 
-  private async updateBulkPoolStates(pools: Pool[]): Promise<void> {
+  public async updateBulkPoolStates(pools: Pool[]): Promise<void> {
     if (pools.length === 0) return;
 
     // Bulk write operation for much faster updates
@@ -246,7 +248,6 @@ class PoolTracker extends EventEmitter {
 
         // Check if the response matches expected structure
         if (stonfiResponse) {
-          console.log("getting here");
           // Convert StonFi pools to our format
           stonfiPools = stonfiResponse.map((pool) =>
             this.convertStonFiPool(pool)
@@ -328,9 +329,8 @@ class PoolService {
     await this.tracker.connect();
 
     // Store pool metadata and start tracking
-    for (const pool of pools) {
-      this.knownPools.set(pool.address, pool);
-      await this.tracker.addPool(pool);
+    if (pools.length > 0) {
+      await this.tracker.updateBulkPoolStates(pools);
     }
 
     // Start tracking

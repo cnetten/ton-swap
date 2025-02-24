@@ -331,9 +331,21 @@ export async function POST(req: Request) {
         ? "native"
         : toAddress;
 
+    const poolService = PoolService.getInstance();
+    const [dedustPools, stonfiPools] = await Promise.all([
+      poolService.getPoolsBySource("dedust"),
+      poolService.getPoolsBySource("stonfi"),
+    ]);
+
+    // Combine all pools for decimals lookup
+    const allPools = [...dedustPools, ...stonfiPools];
+
+    // Get fromDecimals before finding paths
+    const fromDecimals = getTokenDecimals(actualFromAddress, allPools);
+
     // Convert amount to proper decimal representation (assuming 9 decimals)
     const amountNumber = Number(amount);
-    const amountInteger = Math.floor(amountNumber * 1e9);
+    const amountInteger = Math.floor(amountNumber * Math.pow(10, fromDecimals));
     const amountWithDecimals = BigInt(amountInteger).toString();
 
     // Convert slippageTolerance to decimal (e.g., 0.5 -> 0.005)
@@ -374,7 +386,6 @@ export async function POST(req: Request) {
     }
 
     // Format the result
-    const fromDecimals = getTokenDecimals(actualFromAddress, bestPath.pools);
     const toDecimals = getTokenDecimals(actualToAddress, bestPath.pools);
 
     const formattedPath = {

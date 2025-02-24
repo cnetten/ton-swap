@@ -61,7 +61,7 @@ function normalizeAmount(amount: string, decimals: number): string {
   return (Number(amount) / Math.pow(10, decimals)).toFixed(decimals);
 }
 
-export function buildPoolGraph(filteredPools: Pool[]) {
+function buildPoolGraph(filteredPools: Pool[]) {
   const poolGraph = new Map<string, Map<string, number>>();
   const poolsByPair = new Map<string, Pool>();
 

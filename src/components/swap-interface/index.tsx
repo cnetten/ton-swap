@@ -33,7 +33,8 @@ export const SwapInterface = () => {
   const [state, setState] = useState({
     fromToken: DEFAULT_TOKENS[0],
     toToken: DEFAULT_TOKENS[0],
-    rawSimulation: {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rawSimulation: {} as any,
     fromAmount: "",
     toAmount: "",
     priceImpact: "0",

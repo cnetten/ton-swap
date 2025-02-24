@@ -129,7 +129,7 @@ const filterPoolsByLiquidity = (
 
     // Check trade fee against slippage tolerance
     const tradeFee = parseFloat(pool.tradeFee || "0");
-    if (tradeFee > parseFloat(maxTradeFee)) {
+    if (tradeFee > maxTradeFee) {
       return false;
     }
 
@@ -217,8 +217,8 @@ async function findBestPathsBySource(
     `After filtering: ${filteredDedustPools.length} DeDust pools and ${filteredStonfiPools.length} StonFi pools`
   );
 
-  let bestDedustPath: PathWithCost | null = null;
-  let bestStonfiPath: PathWithCost | null = null;
+  let bestDedustPath: any | null = null;
+  let bestStonfiPath: any | null = null;
 
   // Find best path for DeDust pools
   if (filteredDedustPools.length > 0) {

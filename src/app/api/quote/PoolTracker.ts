@@ -168,7 +168,7 @@ class PoolTracker extends EventEmitter {
   }
 
   // Function to convert StonFi pool data to our Pool format
-  private convertStonFiPool(stonfiPool: StonFiPool): Pool {
+  private convertStonFiPool(stonfiPool: any): Pool {
     // Create token metadata for token0 and token1
     // Note: In a real implementation, you'd likely fetch token metadata from a registry
     const token0Metadata: TokenMetadata = {
@@ -279,14 +279,22 @@ class PoolTracker extends EventEmitter {
   }
 
   async getPool(address: string): Promise<Pool | null> {
-    return await this.db.findOne({ address });
+    const result = await this.db.findOne({ address });
+
+    if (!result) {
+      return null;
+    }
+
+    return result as unknown as Pool;
   }
 
   async getAllPools(): Promise<Pool[]> {
     if (!this.db) {
       await this.connect();
     }
-    return await this.db!.find({}).toArray();
+    const results = await this.db!.find({}).toArray();
+    const pools = results.map((doc) => doc as unknown as Pool);
+    return pools;
   }
 
   // Get pools by source
@@ -294,7 +302,11 @@ class PoolTracker extends EventEmitter {
     if (!this.db) {
       await this.connect();
     }
-    return await this.db!.find({ source }).toArray();
+    const results = await this.db!.find({ source }).toArray();
+
+    const pools = results.map((doc) => doc as unknown as Pool);
+
+    return pools;
   }
 
   async disconnect(): Promise<void> {

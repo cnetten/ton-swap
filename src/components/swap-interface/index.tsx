@@ -20,6 +20,7 @@ import {
   JettonRoot,
 } from "@dedust/sdk";
 import { TonClient4 } from "@ton/ton";
+import { StonApiClient } from "@ston-fi/api";
 
 export const SwapInterface = () => {
   const [tonConnectUI] = useTonConnectUI();
@@ -117,6 +118,11 @@ export const SwapInterface = () => {
     if (state.fromAmount) {
       handleFromAmountChange(state.fromAmount);
     }
+    const stonfiClient = new StonApiClient();
+    const pools = stonfiClient.getAsset(
+      "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
+    );
+    console.log(pools);
   }, [
     handleFromAmountChange,
     state.fromAmount,
@@ -144,8 +150,16 @@ export const SwapInterface = () => {
       }
 
       // Calculate amounts
-      const amountIn = toNano(swapPath.inputAmount);
-      const minimumOutput = toNano(swapPath.minimumAmountOut);
+      let amountIn;
+      let minimumOutput;
+
+      if (firstToken === "native") {
+        amountIn = toNano(swapPath.inputAmount);
+        minimumOutput = toNano(swapPath.minimumAmountOut);
+      } else {
+        amountIn = BigInt(swapPath.inputAmount);
+        minimumOutput = BigInt(swapPath.minimumAmountOut);
+      }
 
       // Create nested pool configuration
       const buildSwapConfig = (index = 0) => {

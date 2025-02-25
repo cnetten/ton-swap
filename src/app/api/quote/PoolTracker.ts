@@ -76,6 +76,8 @@ class PoolTracker extends EventEmitter {
   private trackingInterval: NodeJS.Timeout | null = null;
   private readonly TRACK_INTERVAL = 5000; // 5 seconds
   private mongoClient: MongoClient | null = null;
+  // Track if a connection is in progress to prevent multiple simultaneous connection attempts
+  private connectionInProgress: Promise<void> | null = null;
 
   constructor(
     private readonly tonEndpoint: string = "https://mainnet-v4.tonhubapi.com",
@@ -90,27 +92,90 @@ class PoolTracker extends EventEmitter {
   private lastUpdateTime: Map<string, number> = new Map();
 
   async connect(): Promise<void> {
+    // If already connected, return immediately
     if (this.db) return;
+
+    // If a connection attempt is already in progress, wait for it to complete
+    if (this.connectionInProgress) {
+      await this.connectionInProgress;
+      return;
+    }
+
+    // Start a new connection attempt and store the promise
+    const connectionPromise = this._doConnect();
+    this.connectionInProgress = connectionPromise;
+
     try {
+      await connectionPromise;
+    } finally {
+      // Clear the connection promise when done (whether successful or failed)
+      if (this.connectionInProgress === connectionPromise) {
+        this.connectionInProgress = null;
+      }
+    }
+  }
+
+  private async _doConnect(): Promise<void> {
+    try {
+      console.log("Connecting to MongoDB...");
+
+      // Check if we already have an active connection
+      if (this.mongoClient && this.db) {
+        try {
+          // Ping the database to verify the connection is active
+          await this.mongoClient.db().command({ ping: 1 });
+          console.log("Reusing existing MongoDB connection");
+          return;
+        } catch (err) {
+          console.log("Existing connection is invalid, creating a new one");
+          // Continue to create a new connection
+        }
+      }
+
+      // Close any existing client that might be in an invalid state
+      if (this.mongoClient) {
+        try {
+          await this.mongoClient.close(true);
+          this.mongoClient = null;
+        } catch (err) {
+          console.error("Error closing existing MongoDB client:", err);
+        }
+      }
+
+      // Connect with proper options for connection pooling
       this.mongoClient = await MongoClient.connect(this.mongoUri, {
-        maxPoolSize: 50, // Maximum number of connections in the pool
-        minPoolSize: 5, // Minimum number of connections to maintain
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        connectTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+        waitQueueTimeoutMS: 2000,
       });
+
       const db = this.mongoClient.db();
       this.db = db.collection("pool_states");
 
       // Create indexes
       await this.db.createIndex({ address: 1 }, { unique: true });
       await this.db.createIndex({ lastUpdateTimestamp: 1 });
-      await this.db.createIndex({ source: 1 }); // Index for source field
+      await this.db.createIndex({ source: 1 });
       await this.db.createIndex({ source: 1, type: 1 }, { background: true });
       await this.db.createIndex(
         { source: 1, lastUpdateTimestamp: -1 },
         { background: true }
       );
-      console.log("Connected to MongoDB successfully");
+
+      console.log("MongoDB connection established successfully");
     } catch (error) {
       console.error("Failed to connect to MongoDB:", error);
+      // Ensure we clean up in case of connection failure
+      if (this.mongoClient) {
+        try {
+          await this.mongoClient.close(true);
+        } catch (err) {
+          // Ignore errors during cleanup
+        }
+        this.mongoClient = null;
+      }
       throw error;
     }
   }
@@ -187,10 +252,6 @@ class PoolTracker extends EventEmitter {
       const updatedPools = Array.from(poolMap.values());
       this.inMemoryPools.set(source, updatedPools);
       this.lastUpdateTime.set(source, Date.now());
-
-      console.log(
-        `Updated in-memory ${source} pools: ${updatedPools.length} total`
-      );
     }
 
     // Proceed with database update
@@ -214,29 +275,72 @@ class PoolTracker extends EventEmitter {
   }
 
   // Function to convert StonFi pool data to our Pool format
-  private convertStonFiPool(stonfiPool: any): Pool {
-    // Create token metadata for token0 and token1
-    const token0Metadata: TokenMetadata = {
+  private async convertStonFiPool(
+    stonfiPool: any,
+    client?: StonApiClient
+  ): Promise<Pool> {
+    // Use provided client or create a new one if not provided
+    const stonfiClient = client || new StonApiClient();
+
+    // Fetch the asset information for both tokens
+    let token0Metadata: TokenMetadata = {
       name: "Unknown Token 0",
       symbol: "UNK0",
       decimals: 9,
     };
 
-    const token1Metadata: TokenMetadata = {
+    let token1Metadata: TokenMetadata = {
       name: "Unknown Token 1",
       symbol: "UNK1",
       decimals: 9,
     };
+    let asset0Type = "jetton";
+    let asset1Type = "jetton";
 
-    // Create token assets
+    try {
+      // Use Promise.all to fetch both assets in parallel
+      const [asset0, asset1] = await Promise.all([
+        stonfiPool.token0_address
+          ? stonfiClient.getAsset(stonfiPool.token0_address)
+          : null,
+        stonfiPool.token1_address
+          ? stonfiClient.getAsset(stonfiPool.token1_address)
+          : null,
+      ]);
+
+      // Process asset0 if available
+      if (asset0) {
+        token0Metadata = {
+          name: asset0.displayName || "Unknown Token 0",
+          symbol: asset0.symbol || "UNK0",
+          decimals: asset0.decimals || 9,
+        };
+        asset0Type = asset0.kind;
+      }
+
+      // Process asset1 if available
+      if (asset1) {
+        token1Metadata = {
+          name: asset1.displayName || "Unknown Token 1",
+          symbol: asset1.symbol || "UNK1",
+          decimals: asset1.decimals || 9,
+        };
+        asset1Type = asset1.kind;
+      }
+    } catch (error) {
+      console.error(`Error fetching asset information:`, error);
+      // Continue with default metadata if fetching fails
+    }
+
+    // Create token assets with the fetched metadata
     const assets: TokenAsset[] = [
       {
-        type: "token",
+        type: asset0Type,
         address: stonfiPool.token0_address,
         metadata: token0Metadata,
       },
       {
-        type: "token",
+        type: asset1Type,
         address: stonfiPool.token1_address,
         metadata: token1Metadata,
       },
@@ -259,7 +363,7 @@ class PoolTracker extends EventEmitter {
           stonfiPool.collected_token0_protocol_fee,
           stonfiPool.collected_token1_protocol_fee,
         ],
-        volume: ["0", "0"],
+        volume: [stonfiPool.token0_balance, stonfiPool.token1_balance],
       },
       source: "stonfi",
       lastUpdateTimestamp: Date.now(),
@@ -268,6 +372,8 @@ class PoolTracker extends EventEmitter {
 
   async startTracking(): Promise<void> {
     if (this.isTracking) return;
+
+    // Create clients once and reuse them
     const dedustSDK = new DeDustClient({
       endpointUrl: "https://api.dedust.io",
     });
@@ -275,29 +381,51 @@ class PoolTracker extends EventEmitter {
     const stonfiClient = new StonApiClient();
 
     this.isTracking = true;
+
+    // Flag to track if an update operation is in progress
+    let updateInProgress = false;
+
     this.trackingInterval = setInterval(async () => {
+      // Skip this update cycle if the previous one is still running
+      if (updateInProgress) {
+        console.log(
+          "Skipping update cycle - previous operation still in progress"
+        );
+        return;
+      }
+
+      updateInProgress = true;
+
       try {
-        // Fetch pools from DeDust
-        const dedustPools = await dedustSDK.getPools();
-        // Add source field to track the origin
+        // Create promises for both API requests but don't await them yet
+        const dedustPromise = dedustSDK.getPools();
+        const stonfiPromise = stonfiClient.getPools();
+
+        // Wait for both API calls in parallel
+        const [dedustPools, stonfiResponse] = await Promise.all([
+          dedustPromise,
+          stonfiPromise,
+        ]);
+
+        // Process DeDust pools
         const taggedDedustPools = dedustPools.map((pool) => ({
           ...pool,
           source: "dedust",
           lastUpdateTimestamp: Date.now(),
         }));
 
-        // Fetch pools from StonFi
-        const stonfiResponse = await stonfiClient.getPools();
+        // Process StonFi pools
         let stonfiPools: Pool[] = [];
-
-        // Check if the response matches expected structure
-        if (stonfiResponse) {
-          // Convert StonFi pools to our format
-          stonfiPools = stonfiResponse.map((pool) =>
-            this.convertStonFiPool(pool)
+        if (stonfiResponse && Array.isArray(stonfiResponse)) {
+          // Convert StonFi pools to our format - using Promise.all to properly await all conversions
+          // Pass the client to avoid creating new connections
+          stonfiPools = await Promise.all(
+            stonfiResponse.map((pool) =>
+              this.convertStonFiPool(pool, stonfiClient)
+            )
           );
         } else {
-          console.error("Unexpected StonFi response format:");
+          console.error("Unexpected StonFi response format");
         }
 
         // Combine pools from both sources
@@ -305,11 +433,11 @@ class PoolTracker extends EventEmitter {
 
         // Update all pools in a single bulk operation
         await this.updateBulkPoolStates(allPools);
-        console.log(
-          `Updated ${taggedDedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
-        );
       } catch (error) {
         console.error("Pools update error:", error);
+      } finally {
+        // Always mark the update as completed, even if there was an error
+        updateInProgress = false;
       }
     }, 15000);
   }
@@ -353,16 +481,9 @@ class PoolTracker extends EventEmitter {
       const lastUpdate = this.lastUpdateTime.get(source) || 0;
       const ageInSeconds = (Date.now() - lastUpdate) / 1000;
 
-      console.log(
-        `Using ${
-          pools.length
-        } in-memory ${source} pools (${ageInSeconds.toFixed(1)}s old)`
-      );
       return pools;
     }
 
-    // If not in memory, load from database
-    console.log(`No in-memory pools for ${source}, loading from database...`);
     const startTime = Date.now();
 
     const results = await this.db!.find({ source }).toArray();
@@ -372,11 +493,6 @@ class PoolTracker extends EventEmitter {
     this.inMemoryPools.set(source, pools);
     this.lastUpdateTime.set(source, Date.now());
 
-    console.log(
-      `Loaded ${pools.length} ${source} pools from database in ${
-        Date.now() - startTime
-      }ms`
-    );
     return pools;
   }
 
@@ -445,17 +561,21 @@ class PoolTracker extends EventEmitter {
       return true;
     });
 
-    console.log(
-      `Filtered ${pools.length} ${source} pools to ${filteredPools.length} in ${
-        Date.now() - startTime
-      }ms`
-    );
     return filteredPools;
   }
 
   async disconnect(): Promise<void> {
     if (this.mongoClient) {
-      await this.mongoClient.close();
+      try {
+        console.log("Closing MongoDB connection...");
+        await this.mongoClient.close(true);
+        console.log("MongoDB connection closed successfully");
+      } catch (error) {
+        console.error("Error closing MongoDB connection:", error);
+      } finally {
+        this.mongoClient = null;
+        this.db = null;
+      }
     }
   }
 }
@@ -499,7 +619,6 @@ class PoolService {
 
   private async _doInitialize(pools: Pool[]): Promise<void> {
     try {
-      console.log("Starting PoolService initialization...");
       const startTime = Date.now();
 
       // Connect to MongoDB
@@ -510,7 +629,6 @@ class PoolService {
       for (const source of sources) {
         // This will populate the in-memory cache
         await this.tracker.getPoolsBySource(source);
-        console.log(`Preloaded ${source} pools into cache`);
       }
 
       // Store pool metadata if provided
@@ -522,9 +640,6 @@ class PoolService {
       await this.tracker.startTracking();
 
       this.initialized = true;
-      console.log(
-        `PoolService initialization completed in ${Date.now() - startTime}ms`
-      );
     } catch (error) {
       console.error("Failed to initialize PoolService:", error);
       this.initializationPromise = null; // Reset promise so initialization can be retried

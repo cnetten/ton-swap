@@ -20,7 +20,12 @@ import {
   JettonRoot,
 } from "@dedust/sdk";
 import { TonClient4 } from "@ton/ton";
-import { StonApiClient } from "@ston-fi/api";
+
+function convertTokenAmount(humanReadableAmount, decimals) {
+  return BigInt(
+    Math.floor(Number(humanReadableAmount) * 10 ** decimals)
+  ).toString();
+}
 
 export const SwapInterface = () => {
   const [tonConnectUI] = useTonConnectUI();
@@ -118,11 +123,6 @@ export const SwapInterface = () => {
     if (state.fromAmount) {
       handleFromAmountChange(state.fromAmount);
     }
-    const stonfiClient = new StonApiClient();
-    const pools = stonfiClient.getAsset(
-      "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
-    );
-    console.log(pools);
   }, [
     handleFromAmountChange,
     state.fromAmount,
@@ -135,8 +135,6 @@ export const SwapInterface = () => {
     });
 
     try {
-      console.log("Input swap path:", swapPath);
-
       const factory = tonClient.open(
         Factory.createFromAddress(MAINNET_FACTORY_ADDR)
       );
@@ -148,15 +146,26 @@ export const SwapInterface = () => {
       if ((await vault.getReadinessStatus()) !== ReadinessStatus.READY) {
         throw new Error("Vault not ready");
       }
-
+      const fromDecimals =
+        firstToken === "native"
+          ? 9
+          : swapPath.pools[0].assets.find(
+              (a) => (a.address || a.type) === firstToken
+            )?.metadata?.decimals || 9;
       // Calculate amounts
-      const amountIn = toNano(swapPath.inputAmount);
+      let amountIn;
+      if (firstToken === "native") {
+        // For native TON, use toNano (which applies 10^9)
+        amountIn = toNano(swapPath.inputAmount);
+      } else {
+        // For other tokens, use their specific decimals
+        amountIn = convertTokenAmount(swapPath.inputAmount, fromDecimals);
+      }
       const minimumOutput = toNano(swapPath.minimumAmountOut);
 
       // Create nested pool configuration
       const buildSwapConfig = (index = 0) => {
         if (index > swapPath.pools.length - 1) return undefined;
-        console.log(toNano(minimumOutput));
         return {
           poolAddress: Address.parse(swapPath.pools[index].address),
           limit:
@@ -193,12 +202,10 @@ export const SwapInterface = () => {
         const scaleVault = tonClient.open(
           await factory.getJettonVault(Address.parse(firstToken))
         );
-        console.log("Sending swap to vault:", scaleVault);
 
         const root = tonClient.open(
           JettonRoot.createFromAddress(Address.parse(firstToken))
         );
-        console.log("Sending swap to root:", root);
 
         const wallet = tonClient.open(
           await root.getWallet(Address.parse(userFriendlyAddress))
@@ -230,7 +237,6 @@ export const SwapInterface = () => {
             }),
           }
         );
-        console.log(returnSwap);
       }
 
       return returnSwap;
@@ -264,20 +270,7 @@ export const SwapInterface = () => {
         throw new Error("No pools in swap path");
       }
 
-      console.log("Starting swap:", {
-        path: swapPath.pathReadable,
-        inputAmount: swapPath.inputAmount,
-        minimumAmountOut: swapPath.minimumAmountOut,
-        pools: swapPath.pools.map((p) => ({
-          address: p.address,
-        })),
-      });
-
-      const result = await prepareTonConnectMultiHopSwap(
-        tonConnectUI,
-        swapPath
-      );
-      console.log("Swap initiated:", result);
+      await prepareTonConnectMultiHopSwap(tonConnectUI, swapPath);
     } catch (error) {
       console.error("Swap failed:", error.message);
     } finally {

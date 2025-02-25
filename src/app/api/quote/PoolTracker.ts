@@ -319,8 +319,7 @@ class PoolTracker extends EventEmitter {
     const startTime = Date.now();
     console.log(`Starting database update for ${pools.length} pools`);
 
-    // Split bulk operations into smaller chunks
-    const CHUNK_SIZE = 25; // Process 25 pools at a time (smaller chunks for faster processing)
+    const CHUNK_SIZE = 25;
     const chunks = [];
 
     for (let i = 0; i < pools.length; i += CHUNK_SIZE) {
@@ -332,34 +331,75 @@ class PoolTracker extends EventEmitter {
     );
 
     try {
-      // Process each chunk with Promise.all for parallel processing
-      // Use smaller batches of chunks to avoid overwhelming the database
-      const PARALLEL_CHUNKS = 5; // Process 5 chunks in parallel
+      const PARALLEL_CHUNKS = 5;
 
       for (let i = 0; i < chunks.length; i += PARALLEL_CHUNKS) {
         const batchChunks = chunks.slice(i, i + PARALLEL_CHUNKS);
         const batchPromises = batchChunks.map(async (chunk) => {
-          const bulkOps = chunk.map((pool) => ({
-            updateOne: {
-              filter: { address: pool.address },
-              update: {
-                $set: {
-                  // Only update essential fields to minimize data transfer
-                  address: pool.address,
-                  reserves: pool.reserves,
-                  lastPrice: pool.lastPrice,
-                  lastUpdateTimestamp: pool.lastUpdateTimestamp,
-                  source: pool.source,
-                },
-              },
-              upsert: true,
-            },
-          }));
+          const addresses = chunk.map((pool) => pool.address);
 
-          // Short timeout to prevent hanging operations
+          const existingPoolsArray = await this.db
+            .find({
+              address: { $in: addresses },
+            })
+            .toArray();
+
+          const existingPools = new Map();
+          for (const pool of existingPoolsArray) {
+            existingPools.set(pool.address, pool);
+          }
+
+          const bulkOps = chunk.map((pool) => {
+            const isExisting = existingPools.has(pool.address);
+            const existingPool = existingPools.get(pool.address);
+
+            if (isExisting) {
+              const updateFields: any = {};
+
+              updateFields.lastUpdateTimestamp =
+                pool.lastUpdateTimestamp || Date.now();
+
+              if (pool.reserves) updateFields.reserves = pool.reserves;
+              if (pool.lastPrice) updateFields.lastPrice = pool.lastPrice;
+
+              if (pool.source) updateFields.source = pool.source;
+
+              if (pool.assets) updateFields.assets = pool.assets;
+              if (pool.totalSupply) updateFields.totalSupply = pool.totalSupply;
+              if (pool.type) updateFields.type = pool.type;
+              if (pool.tradeFee) updateFields.tradeFee = pool.tradeFee;
+              if (pool.stats) updateFields.stats = pool.stats;
+
+              return {
+                updateOne: {
+                  filter: { address: pool.address },
+                  update: { $set: updateFields },
+                },
+              };
+            } else {
+              return {
+                insertOne: {
+                  document: {
+                    address: pool.address,
+                    reserves: pool.reserves || [],
+                    lastPrice: pool.lastPrice || { value: "0" },
+                    lastUpdateTimestamp: pool.lastUpdateTimestamp || Date.now(),
+                    source: pool.source || "unknown",
+                    assets: pool.assets || [],
+                    totalSupply: pool.totalSupply || "0",
+                    type: pool.type || "unknown",
+                    tradeFee: pool.tradeFee || "0",
+                    stats: pool.stats || { fees: [], volume: [] },
+                    lt: pool.lt || "0",
+                  },
+                },
+              };
+            }
+          });
+
           const bulkWriteOptions = {
             ordered: false,
-            wtimeout: 15000, // 10 second write timeout
+            wtimeout: 15000, // 15 second write timeout
           };
 
           return this.db.bulkWrite(bulkOps, bulkWriteOptions);
@@ -611,15 +651,17 @@ class PoolTracker extends EventEmitter {
               console.log(`Processing StonFi batch ${i + 1}/${numBatches}`);
 
               const batchResults = await Promise.all(
-                batch.map((pool) => {
+                batch.map(async (pool) => {
                   if (pool.deprecated) return null;
-                  this.convertStonFiPool(pool, stonfiClient).catch((err) => {
+                  try {
+                    return await this.convertStonFiPool(pool, stonfiClient);
+                  } catch (err) {
                     console.error(
                       `Error converting StonFi pool ${pool.address}:`,
                       err
                     );
                     return null;
-                  });
+                  }
                 })
               );
 
@@ -853,6 +895,144 @@ class PoolTracker extends EventEmitter {
     console.log(`Falling back to database for ${source} pools`);
     return this.getPoolsBySource(source);
   }
+
+  async fixIncompleteRecords(): Promise<void> {
+    console.log("Starting database fix for incomplete records...");
+
+    try {
+      // Make sure we have a database connection
+      if (!this.db) {
+        await this.connect();
+      }
+
+      // Find all incomplete records
+      const incompleteRecords = await this.db
+        .find({
+          $or: [
+            { source: null },
+            { lastUpdateTimestamp: null },
+            { assets: { $exists: false } },
+          ],
+        })
+        .toArray();
+
+      console.log(
+        `Found ${incompleteRecords.length} incomplete records to fix`
+      );
+
+      if (incompleteRecords.length === 0) {
+        console.log("No incomplete records found.");
+        return;
+      }
+
+      // Force a full update on startup
+      let dedustPools: any[] = [];
+      let stonfiPools: any[] = [];
+
+      try {
+        const dedustSDK = new DeDustClient({
+          endpointUrl: "https://api.dedust.io",
+        });
+        dedustPools = await dedustSDK.getPools();
+        console.log(`Fetched ${dedustPools.length} pools from DeDust`);
+      } catch (err) {
+        console.error("Failed to fetch DeDust pools:", err);
+      }
+
+      try {
+        const stonfiClient = new StonApiClient();
+        stonfiPools = await stonfiClient.getPools();
+        console.log(`Fetched ${stonfiPools?.length || 0} pools from StonFi`);
+      } catch (err) {
+        console.error("Failed to fetch StonFi pools:", err);
+      }
+
+      // Process pools into complete records
+      const allPools: Pool[] = [];
+
+      // Process DeDust pools
+      const taggedDedustPools = dedustPools.map((pool) => ({
+        ...pool,
+        source: "dedust",
+        lastUpdateTimestamp: Date.now(),
+      }));
+      allPools.push(...taggedDedustPools);
+
+      // Process StonFi pools
+      if (stonfiPools && Array.isArray(stonfiPools)) {
+        for (const pool of stonfiPools) {
+          if (pool.deprecated) continue;
+
+          try {
+            const convertedPool = await this.convertStonFiPool(pool);
+            if (convertedPool) {
+              allPools.push(convertedPool);
+            }
+          } catch (err) {
+            console.error(`Error converting StonFi pool ${pool.address}:`, err);
+          }
+        }
+      }
+
+      console.log(`Processed ${allPools.length} pools total`);
+
+      // Create a map for quick lookup by address
+      const poolMap = new Map<string, Pool>();
+      for (const pool of allPools) {
+        poolMap.set(pool.address, pool);
+      }
+
+      // Update each incomplete record
+      let fixedCount = 0;
+      let defaultsCount = 0;
+
+      for (const record of incompleteRecords) {
+        const address = record.address;
+        const completeData = poolMap.get(address);
+
+        if (completeData) {
+          // Update with complete data from APIs
+          await this.db.updateOne({ _id: record._id }, { $set: completeData });
+          fixedCount++;
+        } else {
+          // Set default values if no API data found
+          await this.db.updateOne(
+            { _id: record._id },
+            {
+              $set: {
+                source: record.source || "unknown",
+                lastUpdateTimestamp: Date.now(),
+                assets: record.assets || [],
+                totalSupply: record.totalSupply || "0",
+                type: record.type || "unknown",
+                tradeFee: record.tradeFee || "0",
+                stats: record.stats || { fees: [], volume: [] },
+              },
+            }
+          );
+          defaultsCount++;
+        }
+      }
+
+      console.log(`Fixed ${fixedCount} records with API data`);
+      console.log(`Set defaults for ${defaultsCount} records`);
+
+      // Check for any remaining incomplete records
+      const remainingCount = await this.db.countDocuments({
+        $or: [
+          { source: null },
+          { lastUpdateTimestamp: null },
+          { assets: { $exists: false } },
+        ],
+      });
+
+      console.log(`Remaining incomplete records: ${remainingCount}`);
+      console.log("Database fix completed");
+    } catch (error) {
+      console.error("Error fixing incomplete records:", error);
+      throw error;
+    }
+  }
 }
 
 class PoolService {
@@ -944,6 +1124,10 @@ class PoolService {
 
   public getTracker(): PoolTracker {
     return this.tracker;
+  }
+
+  async fixDatabase(): Promise<void> {
+    await this.tracker.fixIncompleteRecords();
   }
 
   async cleanup(): Promise<void> {

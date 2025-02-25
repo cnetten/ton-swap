@@ -145,20 +145,6 @@ export const SwapInterface = () => {
     state.toToken,
   ]);
 
-  function safeAmountToBigInt(amountStr, decimals) {
-    // First, ensure it's a string
-    const str = String(amountStr);
-
-    if (str.includes(".")) {
-      // It's a formatted decimal value, we need to convert to integer units
-      const amountNumber = parseFloat(str);
-      const amountInteger = Math.floor(amountNumber * 10 ** decimals);
-      return BigInt(amountInteger);
-    } else {
-      // It's already an integer value (no decimal point)
-      return BigInt(str);
-    }
-  }
   const prepareTonConnectMultiHopSwap = async (tonConnectUI, swapPath) => {
     const tonClient = new TonClient4({
       endpoint: "https://mainnet-v4.tonhubapi.com",

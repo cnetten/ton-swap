@@ -31,7 +31,7 @@ interface Pool {
     fees: string[];
     volume: string[];
   };
-  source?: string; // Add source field to track where the pool comes from
+  source?: string;
   lastUpdateTimestamp?: number;
 }
 
@@ -216,11 +216,10 @@ class PoolTracker extends EventEmitter {
   // Function to convert StonFi pool data to our Pool format
   private convertStonFiPool(stonfiPool: any): Pool {
     // Create token metadata for token0 and token1
-    // Note: In a real implementation, you'd likely fetch token metadata from a registry
     const token0Metadata: TokenMetadata = {
       name: "Unknown Token 0",
       symbol: "UNK0",
-      decimals: 9, // Default decimals for TON tokens
+      decimals: 9,
     };
 
     const token1Metadata: TokenMetadata = {
@@ -246,13 +245,12 @@ class PoolTracker extends EventEmitter {
     // Create Pool object
     return {
       address: stonfiPool.address,
-      lt: "0", // Default value
+      lt: "0",
       totalSupply: stonfiPool.lp_total_supply,
-      type: "stonfi", // Mark as StonFi pool
+      type: "stonfi",
       tradeFee: stonfiPool.lp_fee,
       assets: assets,
       lastPrice: {
-        // You may calculate this based on reserves
         value: "0",
       },
       reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
@@ -261,9 +259,9 @@ class PoolTracker extends EventEmitter {
           stonfiPool.collected_token0_protocol_fee,
           stonfiPool.collected_token1_protocol_fee,
         ],
-        volume: ["0", "0"], // Default values
+        volume: ["0", "0"],
       },
-      source: "stonfi", // Mark source as StonFi
+      source: "stonfi",
       lastUpdateTimestamp: Date.now(),
     };
   }
@@ -313,7 +311,7 @@ class PoolTracker extends EventEmitter {
       } catch (error) {
         console.error("Pools update error:", error);
       }
-    }, 15000); // Update every 15 seconds
+    }, 15000);
   }
 
   async stopTracking(): Promise<void> {
@@ -343,7 +341,6 @@ class PoolTracker extends EventEmitter {
     return pools;
   }
 
-  // Get pools by source
   async getPoolsBySource(source: string): Promise<Pool[]> {
     // Initialize database connection if needed
     if (!this.db) {
@@ -383,7 +380,6 @@ class PoolTracker extends EventEmitter {
     return pools;
   }
 
-  // Add this utility method to filter pools in memory
   public filterPoolsByLiquidity(
     source: string,
     minReserve: number,
@@ -436,7 +432,6 @@ class PoolTracker extends EventEmitter {
         return false;
       }
 
-      // Check trading activity (DeDust specific)
       if (source === "dedust") {
         const totalVolume = pool.stats.volume
           .map((v) => parseFloat(v) || 0)
@@ -465,11 +460,12 @@ class PoolTracker extends EventEmitter {
   }
 }
 
-// Service to manage pool tracking
 class PoolService {
   private static instance: PoolService;
   private tracker: PoolTracker;
   private knownPools: Map<string, Pool> = new Map();
+  private initialized: boolean = false;
+  private initializationPromise: Promise<void> | null = null;
 
   private constructor() {
     this.tracker = new PoolTracker(
@@ -485,25 +481,75 @@ class PoolService {
     return PoolService.instance;
   }
 
-  async initialize(pools: Pool[]): Promise<void> {
-    // Connect to MongoDB
-    await this.tracker.connect();
-
-    // Store pool metadata and start tracking
-    if (pools.length > 0) {
-      await this.tracker.updateBulkPoolStates(pools);
+  async initialize(pools: Pool[] = []): Promise<void> {
+    // If already initialized, return immediately
+    if (this.initialized) {
+      return;
     }
 
-    // Start tracking
-    await this.tracker.startTracking();
+    // If initialization is in progress, wait for it to complete
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+
+    // Start initialization process and store the promise
+    this.initializationPromise = this._doInitialize(pools);
+    return this.initializationPromise;
+  }
+
+  private async _doInitialize(pools: Pool[]): Promise<void> {
+    try {
+      console.log("Starting PoolService initialization...");
+      const startTime = Date.now();
+
+      // Connect to MongoDB
+      await this.tracker.connect();
+
+      // Preload common data to warm up the cache
+      const sources = ["dedust", "stonfi"];
+      for (const source of sources) {
+        // This will populate the in-memory cache
+        await this.tracker.getPoolsBySource(source);
+        console.log(`Preloaded ${source} pools into cache`);
+      }
+
+      // Store pool metadata if provided
+      if (pools.length > 0) {
+        await this.tracker.updateBulkPoolStates(pools);
+      }
+
+      // Start tracking with a proper error handler
+      await this.tracker.startTracking();
+
+      this.initialized = true;
+      console.log(
+        `PoolService initialization completed in ${Date.now() - startTime}ms`
+      );
+    } catch (error) {
+      console.error("Failed to initialize PoolService:", error);
+      this.initializationPromise = null; // Reset promise so initialization can be retried
+      throw error;
+    }
+  }
+
+  isInitialized(): boolean {
+    return this.initialized;
   }
 
   async getPools(): Promise<Pool[]> {
+    // Ensure initialization before getting pools
+    if (!this.initialized) {
+      await this.initialize();
+    }
     return await this.tracker.getAllPools();
   }
 
-  // Get pools by source
+  // Get pools by source with initialization check
   async getPoolsBySource(source: string): Promise<Pool[]> {
+    // Ensure initialization before getting pools
+    if (!this.initialized) {
+      await this.initialize();
+    }
     return await this.tracker.getPoolsBySource(source);
   }
 
@@ -514,6 +560,8 @@ class PoolService {
   async cleanup(): Promise<void> {
     await this.tracker.stopTracking();
     await this.tracker.disconnect();
+    this.initialized = false;
+    this.initializationPromise = null;
   }
 }
 

@@ -22,21 +22,6 @@ import {
 import { TonClient4 } from "@ton/ton";
 import { StonApiClient } from "@ston-fi/api";
 
-function safeAmountToBigInt(amountStr, decimals) {
-  // First, ensure it's a string
-  const str = String(amountStr);
-
-  if (str.includes(".")) {
-    // It's a formatted decimal value, we need to convert to integer units
-    const amountNumber = parseFloat(str);
-    const amountInteger = Math.floor(amountNumber * 10 ** decimals);
-    return BigInt(amountInteger);
-  } else {
-    // It's already an integer value (no decimal point)
-    return BigInt(str);
-  }
-}
-
 export const SwapInterface = () => {
   const [tonConnectUI] = useTonConnectUI();
   const [isConnected, setIsConnected] = useState(false);
@@ -144,93 +129,38 @@ export const SwapInterface = () => {
     state.fromToken,
     state.toToken,
   ]);
-
   const prepareTonConnectMultiHopSwap = async (tonConnectUI, swapPath) => {
     const tonClient = new TonClient4({
       endpoint: "https://mainnet-v4.tonhubapi.com",
     });
 
     try {
-      console.log("Input swap path:", JSON.stringify(swapPath, null, 2));
-
-      // Log critical values for debugging
-      console.log("Input amount:", swapPath.inputAmount);
-      console.log("Minimum output amount:", swapPath.minimumAmountOut);
+      console.log("Input swap path:", swapPath);
 
       const factory = tonClient.open(
         Factory.createFromAddress(MAINNET_FACTORY_ADDR)
       );
       const firstPool = swapPath.pools[0];
       const firstToken = swapPath.path[0];
+      // Get the native vault
       const vault = tonClient.open(await factory.getNativeVault());
 
       if ((await vault.getReadinessStatus()) !== ReadinessStatus.READY) {
         throw new Error("Vault not ready");
       }
 
-      // Get the decimals for the tokens in the swap
-      const fromTokenDecimals =
-        firstToken === "native"
-          ? 9
-          : swapPath.pools[0].assets.find(
-              (a) => (a.address || a.type) === firstToken
-            )?.metadata?.decimals || 9;
-
-      const toTokenDecimals =
-        swapPath.outPutMint === "native"
-          ? 9
-          : swapPath.pools[swapPath.pools.length - 1].assets.find(
-              (a) => (a.address || a.type) === swapPath.outPutMint
-            )?.metadata?.decimals || 9;
-
-      console.log(
-        `Token decimals - From: ${fromTokenDecimals}, To: ${toTokenDecimals}`
-      );
-
-      // THE FIX: Handle different token types and formats properly
-      let amountIn, minimumOutput;
-
-      if (firstToken === "native") {
-        // For native TON, use toNano to handle conversion from human-readable
-        if (
-          typeof swapPath.inputAmount === "string" &&
-          swapPath.inputAmount.includes(".")
-        ) {
-          amountIn = toNano(swapPath.inputAmount);
-        } else {
-          // If it's already in nanoTON format (no decimal point)
-          amountIn = BigInt(swapPath.inputAmount);
-        }
-
-        if (
-          typeof swapPath.minimumAmountOut === "string" &&
-          swapPath.minimumAmountOut.includes(".")
-        ) {
-          minimumOutput = toNano(swapPath.minimumAmountOut);
-        } else {
-          minimumOutput = BigInt(swapPath.minimumAmountOut);
-        }
-      } else {
-        // For other tokens, handle both formats (with or without decimal points)
-        amountIn = safeAmountToBigInt(swapPath.inputAmount, fromTokenDecimals);
-        minimumOutput = safeAmountToBigInt(
-          swapPath.minimumAmountOut,
-          toTokenDecimals
-        );
-      }
-
-      console.log(
-        `Converted amounts - Input: ${amountIn}, Minimum output: ${minimumOutput}`
-      );
+      // Calculate amounts
+      const amountIn = toNano(swapPath.inputAmount);
+      const minimumOutput = toNano(swapPath.minimumAmountOut);
 
       // Create nested pool configuration
       const buildSwapConfig = (index = 0) => {
         if (index > swapPath.pools.length - 1) return undefined;
-
+        console.log(toNano(minimumOutput));
         return {
           poolAddress: Address.parse(swapPath.pools[index].address),
           limit:
-            index === swapPath.pools.length - 1 ? minimumOutput : undefined,
+            index === swapPath.pools.length ? toNano(minimumOutput) : undefined,
           next: buildSwapConfig(index + 1),
         };
       };
@@ -255,6 +185,7 @@ export const SwapInterface = () => {
           {
             amount: amountIn,
             poolAddress: Address.parse(firstPool.address),
+            // limit: minimumOutput,
             ...buildSwapConfig(),
           }
         );
@@ -262,10 +193,12 @@ export const SwapInterface = () => {
         const scaleVault = tonClient.open(
           await factory.getJettonVault(Address.parse(firstToken))
         );
+        console.log("Sending swap to vault:", scaleVault);
 
         const root = tonClient.open(
           JettonRoot.createFromAddress(Address.parse(firstToken))
         );
+        console.log("Sending swap to root:", root);
 
         const wallet = tonClient.open(
           await root.getWallet(Address.parse(userFriendlyAddress))
@@ -285,18 +218,19 @@ export const SwapInterface = () => {
               });
             },
           },
-          toNano(0.3), // Gas fee in TON
+          toNano(0.3),
           {
             amount: amountIn,
             destination: scaleVault.address,
-            responseAddress: Address.parse(userFriendlyAddress),
-            forwardAmount: toNano("0.2"), // Gas fee in TON
+            responseAddress: Address.parse(userFriendlyAddress), // return gas to user
+            forwardAmount: toNano("0.2"),
             forwardPayload: VaultJetton.createSwapPayload({
               poolAddress: Address.parse(firstPool.address),
               ...buildSwapConfig(),
             }),
           }
         );
+        console.log(returnSwap);
       }
 
       return returnSwap;

@@ -400,13 +400,12 @@ class PoolTracker extends EventEmitter {
     let asset1Type = "jetton";
 
     try {
-      // Use Promise.all to fetch both assets in parallel
       const [asset0, asset1] = await Promise.all([
         stonfiPool.token0_address
-          ? stonfiClient.getAsset(stonfiPool.token0_address)
+          ? stonfiClient.getAsset(stonfiPool.token0Address)
           : null,
         stonfiPool.token1_address
-          ? stonfiClient.getAsset(stonfiPool.token1_address)
+          ? stonfiClient.getAsset(stonfiPool.token1Address)
           : null,
       ]);
 
@@ -452,9 +451,9 @@ class PoolTracker extends EventEmitter {
     return {
       address: stonfiPool.address,
       lt: "0",
-      totalSupply: stonfiPool.lp_total_supply,
+      totalSupply: stonfiPool.lpTotalSupply,
       type: "stonfi",
-      tradeFee: stonfiPool.lp_fee,
+      tradeFee: stonfiPool.lpFee,
       assets: assets,
       lastPrice: {
         value: "0",
@@ -462,8 +461,8 @@ class PoolTracker extends EventEmitter {
       reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
       stats: {
         fees: [
-          stonfiPool.collected_token0_protocol_fee,
-          stonfiPool.collected_token1_protocol_fee,
+          stonfiPool.collectedToken0ProtocolFee,
+          stonfiPool.collectedToken1ProtocolFee,
         ],
         volume: [stonfiPool.token0_balance, stonfiPool.token1_balance],
       },
@@ -612,15 +611,16 @@ class PoolTracker extends EventEmitter {
               console.log(`Processing StonFi batch ${i + 1}/${numBatches}`);
 
               const batchResults = await Promise.all(
-                batch.map((pool) =>
+                batch.map((pool) => {
+                  if (pool.deprecated) return null;
                   this.convertStonFiPool(pool, stonfiClient).catch((err) => {
                     console.error(
                       `Error converting StonFi pool ${pool.address}:`,
                       err
                     );
                     return null;
-                  })
-                )
+                  });
+                })
               );
 
               stonfiPools.push(...(batchResults.filter(Boolean) as Pool[]));

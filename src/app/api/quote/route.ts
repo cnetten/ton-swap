@@ -353,7 +353,6 @@ export async function POST(req: Request) {
 
     // Get fromDecimals before finding paths
     const fromDecimals = getTokenDecimals(actualFromAddress, allPools);
-    // Convert amount to proper decimal representation (assuming 9 decimals)
     const amountNumber = Number(amount);
     const amountInteger = Math.floor(amountNumber * 10 ** fromDecimals);
     console.log(amountInteger);
@@ -419,10 +418,13 @@ export async function POST(req: Request) {
       source: bestPath.source, // Include the source in the result
     };
 
-    if (bestPath.path && bestPath.path[bestPath.path.length - 1] === "native") {
-      console.log("Applying correction for token-to-TON conversion");
+    if (
+      fromDecimals === 9 &&
+      bestPath.path &&
+      bestPath.path[bestPath.path.length - 1] === "native"
+    ) {
       bestPath.outputAmount = (
-        BigInt(bestPath.outputAmount) / BigInt(100)
+        BigInt(bestPath.outputAmount) / BigInt(1000)
       ).toString();
 
       formattedPath.estimatedOutput = normalizeAmount(

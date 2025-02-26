@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   images: {
-    domains: ["asset.ston.fi"], // Add 'asset.ston.fi' to the list
+    domains: ["asset.ston.fi", "cache.tonapi.io"], // Add 'asset.ston.fi' to the list
     dangerouslyAllowSVG: true, // Enable SVGs
   },
   /* config options here */

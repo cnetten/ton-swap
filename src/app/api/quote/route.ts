@@ -254,17 +254,28 @@ async function findBestPathsBySource(
     const { poolGraph: stonfiGraph, poolsByPair: stonfiPoolsByPair } =
       buildPoolGraph(filteredStonfiPools);
 
+    console.log(`StonFi graph has ${stonfiGraph.size} nodes`);
+
+    const stonFiFromAdress =
+      fromAddress === "native"
+        ? "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+        : fromAddress;
+    const stonFiToAddress =
+      toAddress === "native"
+        ? "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+        : toAddress;
+
     console.log("Finding swap paths for StonFi pools...");
     const stonfiPaths = await findSwapPathsParallel(
       stonfiGraph,
       stonfiPoolsByPair,
-      fromAddress,
-      toAddress,
+      stonFiFromAdress,
+      stonFiToAddress,
       amountWithDecimals,
       4, // maxDepth
       1 // maxPaths
     );
-
+    console.log(stonfiPaths.length);
     if (stonfiPaths.length > 0) {
       bestStonfiPath = { ...stonfiPaths[0], source: "stonfi" };
       console.log(
@@ -342,10 +353,10 @@ export async function POST(req: Request) {
 
     // Get fromDecimals before finding paths
     const fromDecimals = getTokenDecimals(actualFromAddress, allPools);
-
     // Convert amount to proper decimal representation (assuming 9 decimals)
     const amountNumber = Number(amount);
     const amountInteger = Math.floor(amountNumber * 10 ** fromDecimals);
+    console.log(amountInteger);
     const amountWithDecimals = BigInt(amountInteger).toString();
 
     // Convert slippageTolerance to decimal (e.g., 0.5 -> 0.005)
@@ -407,6 +418,25 @@ export async function POST(req: Request) {
       pathDepth: bestPath.pathDepth + 1,
       source: bestPath.source, // Include the source in the result
     };
+
+    if (bestPath.path && bestPath.path[bestPath.path.length - 1] === "native") {
+      console.log("Applying correction for token-to-TON conversion");
+      bestPath.outputAmount = (
+        BigInt(bestPath.outputAmount) / BigInt(100)
+      ).toString();
+
+      formattedPath.estimatedOutput = normalizeAmount(
+        bestPath.outputAmount,
+        toDecimals
+      );
+      formattedPath.minimumAmountOut =
+        Number(formattedPath.estimatedOutput) -
+        Number(formattedPath.estimatedOutput) * slippageDecimal;
+      formattedPath.outPerIn = (
+        Number(formattedPath.estimatedOutput) /
+        Number(normalizeAmount(bestPath.inputAmount, fromDecimals))
+      ).toFixed(9);
+    }
 
     return NextResponse.json({
       swapPaths: [formattedPath],

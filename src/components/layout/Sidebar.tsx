@@ -9,6 +9,7 @@ import { useState, useEffect } from "react";
 import { TonClient } from "@ton/ton";
 import { useTonAddress } from "../tonconnect/hooks/useTonAddress";
 import { Address } from "@ton/core";
+import Image from "next/image";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -19,23 +20,48 @@ export const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
   const pathname = usePathname();
   const [tonConnectUI] = useTonConnectUI();
   const [balance, setBalance] = useState<string>("0");
+  const [jettonBalances, setJettonBalances] = useState<any>([]);
   const userFriendlyAddress = useTonAddress();
 
   const navigation = [{ name: "Swap", href: "/", icon: ArrowLeftRight }];
-
+  console.log(jettonBalances);
   useEffect(() => {
     const fetchBalance = async () => {
       if (tonConnectUI.connected && userFriendlyAddress) {
         try {
-          const client = new TonClient({
-            endpoint: "https://toncenter.com/api/v2/jsonRPC",
-          });
-          const address = Address.parse(userFriendlyAddress);
-          const balance = await client.getBalance(address);
-          const formattedBalance = (Number(balance) / 1000000000).toFixed(2);
-          setBalance(formattedBalance);
+          const [accountResponse, jettonsResponse] = await Promise.all([
+            fetch(`https://tonapi.io/v2/accounts/${userFriendlyAddress}`),
+            fetch(
+              `https://tonapi.io/v2/accounts/${userFriendlyAddress}/jettons`
+            ),
+          ]);
+
+          const accountData = await accountResponse.json();
+          const jettonsData = await jettonsResponse.json();
+
+          if (accountData && accountData.balance) {
+            const formattedBalance = (
+              Number(accountData.balance) / 1000000000
+            ).toFixed(2);
+            setBalance(formattedBalance);
+          }
+
+          if (jettonsData && jettonsData.balances) {
+            const balances = jettonsData.balances.map((item) => {
+              return {
+                symbol: item.jetton.symbol || "Unknown Token",
+                balance: (
+                  Number(item.balance) /
+                  10 ** (item.jetton.decimals || 9)
+                ).toFixed(2),
+                jettonAddress: item.jetton.address,
+                image: item.jetton.image,
+              };
+            });
+            setJettonBalances(balances);
+          }
         } catch (error) {
-          console.error("Error fetching balance:", error);
+          console.error("Error fetching balances:", error);
         }
       }
     };
@@ -92,8 +118,34 @@ export const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
                   Wallet Balance
                 </h3>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Image
+                    src={
+                      "https://asset.ston.fi/img/EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c/ee9fb21d17bc8d75c2a5f7b5f5f62d2bacec6b128f58b63cb841e98f7b74c4fc"
+                    }
+                    width={20}
+                    height={20}
+                    alt={"TON"}
+                    className="rounded-full w-4 h-4"
+                  />
                   <span>{balance} TON</span>
                 </div>
+                {jettonBalances.map((item) => (
+                  <div
+                    key={item.jettonAddress}
+                    className="flex items-center gap-2 text-sm text-muted-foreground"
+                  >
+                    <Image
+                      src={item.image}
+                      width={20}
+                      height={20}
+                      alt={item.symbol}
+                      className="rounded-full w-4 h-4"
+                    />
+                    <span>
+                      {item.balance} {item.symbol}
+                    </span>
+                  </div>
+                ))}
               </>
             )}
           </div>

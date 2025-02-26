@@ -6,10 +6,9 @@ import { usePathname } from "next/navigation";
 import CustomTonConnectButton from "../ui/CustomTonConnectButton";
 import { useTonConnectUI } from "../tonconnect/hooks/useTonConnectUI";
 import { useState, useEffect } from "react";
-import { TonClient } from "@ton/ton";
 import { useTonAddress } from "../tonconnect/hooks/useTonAddress";
-import { Address } from "@ton/core";
 import Image from "next/image";
+import { JettonBalances } from "@/types/token";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -20,7 +19,7 @@ export const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
   const pathname = usePathname();
   const [tonConnectUI] = useTonConnectUI();
   const [balance, setBalance] = useState<string>("0");
-  const [jettonBalances, setJettonBalances] = useState<any>([]);
+  const [jettonBalances, setJettonBalances] = useState<JettonBalances>([]);
   const userFriendlyAddress = useTonAddress();
 
   const navigation = [{ name: "Swap", href: "/", icon: ArrowLeftRight }];

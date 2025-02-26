@@ -266,16 +266,17 @@ async function findBestPathsBySource(
         : toAddress;
 
     console.log("Finding swap paths for StonFi pools...");
-    const stonfiPaths = await findSwapPathsParallel(
-      stonfiGraph,
-      stonfiPoolsByPair,
-      stonFiFromAdress,
-      stonFiToAddress,
-      amountWithDecimals,
-      4, // maxDepth
-      1 // maxPaths
-    );
-    console.log(stonfiPaths.length);
+    // const stonfiPaths = await findSwapPathsParallel(
+    //   stonfiGraph,
+    //   stonfiPoolsByPair,
+    //   stonFiFromAdress,
+    //   stonFiToAddress,
+    //   amountWithDecimals,
+    //   4, // maxDepth
+    //   1, // maxPaths
+    //   "stonfi"
+    // );
+    const stonfiPaths = [];
     if (stonfiPaths.length > 0) {
       bestStonfiPath = { ...stonfiPaths[0], source: "stonfi" };
       console.log(

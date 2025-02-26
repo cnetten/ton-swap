@@ -76,6 +76,8 @@ class PoolTracker extends EventEmitter {
   private trackingInterval: NodeJS.Timeout | null = null;
   private readonly TRACK_INTERVAL = 5000; // 5 seconds
   private mongoClient: MongoClient | null = null;
+  private trackingIntervals: NodeJS.Timeout[] = [];
+
   // Track if a connection is in progress to prevent multiple simultaneous connection attempts
   private connectionInProgress: Promise<void> | null = null;
 
@@ -506,150 +508,155 @@ class PoolTracker extends EventEmitter {
 
     this.isTracking = true;
 
-    // Use two separate tracking processes with different intervals
-    // 1. Fast in-memory updates for UI and immediate needs
-    // 2. Slower full database updates for persistence
-
     // Keep track of last full update time
     let lastFullUpdateTime = 0;
-    const FULL_UPDATE_INTERVAL = 60000; // 60 seconds between full updates
+    const FULL_UPDATE_INTERVAL = 60000; // 30 seconds between full updates
+    const FAST_UPDATE_INTERVAL = 3000; // 3 seconds between fast updates
 
-    // Flag to track if an update operation is in progress
-    let updateInProgress = false;
+    let fullUpdateInProgress = false;
+    let fastUpdateInProgress = false;
     let consecutiveErrorCount = 0;
 
-    // Fast update interval
-    const TRACKING_INTERVAL = 5000; // 10 seconds
-
-    this.trackingInterval = setInterval(async () => {
-      // Skip this update cycle if the previous one is still running
-      if (updateInProgress) {
+    const fastUpdateInterval = setInterval(async () => {
+      // Skip if a fast update is already running
+      if (fastUpdateInProgress) {
         return;
       }
 
-      const cycleStartTime = Date.now();
-      const needsFullUpdate =
-        cycleStartTime - lastFullUpdateTime >= FULL_UPDATE_INTERVAL;
+      // Skip if it's time for a full update and one is about to start
+      const now = Date.now();
+      if (
+        now - lastFullUpdateTime >= FULL_UPDATE_INTERVAL &&
+        !fullUpdateInProgress
+      ) {
+        return;
+      }
 
-      updateInProgress = true;
+      fastUpdateInProgress = true;
 
       try {
-        // Make sure we have a valid database connection before proceeding
         if (!this.db) {
           await this.connect();
         }
 
-        // Fetch price data more frequently, but with limited scope
-        const updatePricesOnly = !needsFullUpdate;
+        // Fetch from both DeDust and StonFi in parallel
+        const [dedustPools, stonfiResponse] = await Promise.all([
+          dedustSDK.getPools().catch((err) => {
+            console.error("Error fetching DeDust pools for fast update:", err);
+            return [];
+          }),
+          stonfiClient.getPools().catch((err) => {
+            console.error("Error fetching StonFi pools for fast update:", err);
+            return [];
+          }),
+        ]);
 
-        // For price-only updates, just get prices from DeDust as it's typically faster
-        if (updatePricesOnly) {
-          try {
-            const dedustPools = await dedustSDK.getPools();
+        // Process DeDust pools (just the price-critical data)
+        const pricePools = dedustPools.map((pool) => ({
+          address: pool.address,
+          reserves: pool.reserves,
+          lastPrice: pool.lastPrice,
+          source: "dedust",
+          lastUpdateTimestamp: Date.now(),
+        })) as unknown as Pool[];
 
-            // Just update prices and reserves (the most volatile data)
-            const pricePools = dedustPools.map((pool) => ({
+        // Process StonFi pools (price-critical data only)
+        if (stonfiResponse && Array.isArray(stonfiResponse)) {
+          const stonfiPricePools = stonfiResponse
+            .filter((pool) => !pool.deprecated)
+            .map((pool) => ({
               address: pool.address,
-              reserves: pool.reserves,
-              lastPrice: pool.lastPrice,
-              source: "dedust",
+              reserves: [pool.reserve0, pool.reserve1],
+              source: "stonfi",
               lastUpdateTimestamp: Date.now(),
             })) as unknown as Pool[];
 
-            // Fast update in-memory only
-            await this.updateBulkPoolStates(pricePools);
-            consecutiveErrorCount = 0;
-          } catch (error) {
-            console.error("Fast price update error:", error);
-            consecutiveErrorCount++;
-          }
-        }
-        // Full update - get complete data from all sources
-        else {
-          // Create promises for both API requests but don't await them yet
-          const dedustPromise = dedustSDK.getPools().catch((err) => {
-            console.error("Error fetching DeDust pools:", err);
-            return []; // Return empty array on error
-          });
-
-          const stonfiPromise = stonfiClient.getPools().catch((err) => {
-            console.error("Error fetching StonFi pools:", err);
-            return []; // Return empty array on error
-          });
-
-          // Wait for both API calls in parallel with a timeout
-          const [dedustPools, stonfiResponse] = await Promise.all([
-            dedustPromise,
-            stonfiPromise,
-          ]);
-
-          console.log(
-            `Received ${dedustPools.length} pools from DeDust and ${
-              stonfiResponse?.length || 0
-            } from StonFi`
-          );
-
-          // Process DeDust pools
-          const taggedDedustPools = dedustPools.map((pool) => ({
-            ...pool,
-            source: "dedust",
-            lastUpdateTimestamp: Date.now(),
-          }));
-
-          // Process StonFi pools with error handling
-          const stonfiPools: Pool[] = [];
-          if (stonfiResponse && Array.isArray(stonfiResponse)) {
-            // Process pools in parallel batches for faster completion
-            const BATCH_SIZE = 20;
-            const numBatches = Math.ceil(stonfiResponse.length / BATCH_SIZE);
-
-            for (let i = 0; i < numBatches; i++) {
-              const batch = stonfiResponse.slice(
-                i * BATCH_SIZE,
-                (i + 1) * BATCH_SIZE
-              );
-
-              const batchResults = await Promise.all(
-                batch.map(async (pool) => {
-                  if (pool.deprecated) return null;
-                  try {
-                    return await this.convertStonFiPool(pool, stonfiClient);
-                  } catch (err) {
-                    console.error(
-                      `Error converting StonFi pool ${pool.address}:`,
-                      err
-                    );
-                    return null;
-                  }
-                })
-              );
-
-              stonfiPools.push(...(batchResults.filter(Boolean) as Pool[]));
-            }
-          }
-
           // Combine pools from both sources
-          const allPools = [...taggedDedustPools, ...stonfiPools];
-          console.log(`Total pools for full update: ${allPools.length}`);
-
-          if (allPools.length > 0) {
-            // Update all pools
-            await this.updateBulkPoolStates(allPools);
-            consecutiveErrorCount = 0;
-            lastFullUpdateTime = Date.now();
-          } else {
-            console.warn("No pools found in this update cycle");
-          }
+          pricePools.push(...stonfiPricePools);
         }
 
-        const cycleDuration = Date.now() - cycleStartTime;
-        console.log(`Update cycle completed in ${cycleDuration}ms`);
+        // Fast update in-memory only to maintain responsiveness
+        if (pricePools.length > 0) {
+          // Always update in-memory data first for immediate use
+          try {
+            // Group pools by source
+            const poolsBySource = new Map<string, Pool[]>();
+            for (const pool of pricePools) {
+              if (pool.source) {
+                if (!poolsBySource.has(pool.source)) {
+                  poolsBySource.set(pool.source, []);
+                }
+                poolsBySource.get(pool.source)!.push(pool);
+              }
+            }
+
+            // Update in-memory pools for each source
+            for (const [source, sourcePools] of poolsBySource.entries()) {
+              // Get current pools for this source (or empty array)
+              const currentPools = this.inMemoryPools.get(source) || [];
+
+              // Create map for fast lookup of existing pools
+              const poolMap = new Map<string, Pool>();
+              for (const pool of currentPools) {
+                poolMap.set(pool.address, pool);
+              }
+
+              // Update existing or add new pools
+              for (const pool of sourcePools) {
+                // Get existing pool first
+                const existingPool = poolMap.get(pool.address);
+
+                if (existingPool) {
+                  // Merge the update with existing data instead of replacing everything
+                  poolMap.set(pool.address, {
+                    ...existingPool,
+                    ...pool,
+                    assets: pool.assets || existingPool.assets,
+                    reserves: pool.reserves || existingPool.reserves,
+                    stats: pool.stats || existingPool.stats,
+                    lastUpdateTimestamp: Date.now(),
+                  });
+                } else {
+                  poolMap.set(pool.address, {
+                    ...pool,
+                    lastUpdateTimestamp: Date.now(),
+                  });
+                }
+              }
+
+              // Convert back to array and store
+              const updatedPools = Array.from(poolMap.values());
+              this.inMemoryPools.set(source, updatedPools);
+              this.lastUpdateTime.set(source, Date.now());
+            }
+
+            // Emit events for in-memory updates
+            pricePools.forEach((pool) => this.emit("poolStateUpdated", pool));
+
+            if (!fullUpdateInProgress) {
+              this.updatePoolsDatabase(pricePools).catch((error) => {
+                console.error("Background database update failed:", error);
+              });
+              console.log(
+                `Fast update: Updated ${pricePools.length} pools in memory and database`
+              );
+            } else {
+              console.log(
+                `Fast update: Updated ${pricePools.length} pools in memory only (full update in progress)`
+              );
+            }
+          } catch (error) {
+            console.error("In-memory update error:", error);
+          }
+
+          consecutiveErrorCount = 0;
+        }
       } catch (error) {
-        console.error("Pools update error:", error);
+        console.error("Fast price update error:", error);
         consecutiveErrorCount++;
 
-        // If we encounter too many consecutive errors, attempt to reconnect
-        if (consecutiveErrorCount >= 3) {
+        // Reconnect logic for consistent errors (shared with full update)
+        if (consecutiveErrorCount >= 20) {
           console.log(
             "Too many consecutive errors, attempting to reconnect to MongoDB..."
           );
@@ -662,18 +669,131 @@ class PoolTracker extends EventEmitter {
           }
         }
       } finally {
-        // Always mark the update as completed
-        updateInProgress = false;
+        // Always mark the fast update as completed
+        fastUpdateInProgress = false;
       }
-    }, TRACKING_INTERVAL);
+    }, FAST_UPDATE_INTERVAL);
 
-    console.log("Fast pool tracking started successfully");
+    // Set up full update interval (complete database updates)
+    const fullUpdateInterval = setInterval(async () => {
+      const now = Date.now();
+      // Only run full update if it's time and one isn't already in progress
+      if (
+        now - lastFullUpdateTime < FULL_UPDATE_INTERVAL ||
+        fullUpdateInProgress
+      ) {
+        return;
+      }
+
+      fullUpdateInProgress = true;
+      const cycleStartTime = Date.now();
+
+      try {
+        // Make sure we have a valid database connection
+        if (!this.db) {
+          await this.connect();
+        }
+
+        // Create promises for both API requests
+        const dedustPromise = dedustSDK.getPools().catch((err) => {
+          console.error("Error fetching DeDust pools for full update:", err);
+          return []; // Return empty array on error
+        });
+
+        const stonfiPromise = stonfiClient.getPools().catch((err) => {
+          console.error("Error fetching StonFi pools for full update:", err);
+          return []; // Return empty array on error
+        });
+
+        // Wait for both API calls in parallel
+        const [dedustPools, stonfiResponse] = await Promise.all([
+          dedustPromise,
+          stonfiPromise,
+        ]);
+
+        console.log(
+          `Full update: Received ${dedustPools.length} pools from DeDust and ${
+            stonfiResponse?.length || 0
+          } from StonFi`
+        );
+
+        // Process DeDust pools with complete data
+        const taggedDedustPools = dedustPools.map((pool) => ({
+          ...pool,
+          source: "dedust",
+          lastUpdateTimestamp: Date.now(),
+        }));
+
+        // Process StonFi pools with complete data and error handling
+        const stonfiPools: Pool[] = [];
+        if (stonfiResponse && Array.isArray(stonfiResponse)) {
+          // Process pools in parallel batches for faster completion
+          const BATCH_SIZE = 20;
+          const numBatches = Math.ceil(stonfiResponse.length / BATCH_SIZE);
+
+          for (let i = 0; i < numBatches; i++) {
+            const batch = stonfiResponse.slice(
+              i * BATCH_SIZE,
+              (i + 1) * BATCH_SIZE
+            );
+
+            const batchResults = await Promise.all(
+              batch.map(async (pool) => {
+                if (pool.deprecated) return null;
+                try {
+                  return await this.convertStonFiPool(pool, stonfiClient);
+                } catch (err) {
+                  console.error(
+                    `Error converting StonFi pool ${pool.address}:`,
+                    err
+                  );
+                  return null;
+                }
+              })
+            );
+
+            stonfiPools.push(...(batchResults.filter(Boolean) as Pool[]));
+          }
+        }
+
+        // Combine pools from both sources
+        const allPools = [...taggedDedustPools, ...stonfiPools];
+        console.log(`Total pools for full update: ${allPools.length}`);
+
+        if (allPools.length > 0) {
+          // Update all pools with complete data
+          await this.updateBulkPoolStates(allPools);
+          consecutiveErrorCount = 0;
+        } else {
+          console.warn("No pools found in this full update cycle");
+        }
+
+        const cycleDuration = Date.now() - cycleStartTime;
+        console.log(`Full update cycle completed in ${cycleDuration}ms`);
+
+        // Update the timestamp only after successful completion
+        lastFullUpdateTime = Date.now();
+      } catch (error) {
+        console.error("Full update error:", error);
+        consecutiveErrorCount++;
+      } finally {
+        // Always mark the full update as completed
+        fullUpdateInProgress = false;
+      }
+    }, Math.floor(FULL_UPDATE_INTERVAL / 2)); // Check twice as often to account for potential delays
+
+    // Store intervals for cleanup
+    this.trackingIntervals = [fastUpdateInterval, fullUpdateInterval];
+
+    console.log("Dual-cycle pool tracking started successfully");
   }
 
   async stopTracking(): Promise<void> {
-    if (this.trackingInterval) {
-      clearInterval(this.trackingInterval);
-      this.trackingInterval = null;
+    if (this.trackingIntervals) {
+      for (const interval of this.trackingIntervals) {
+        clearInterval(interval);
+      }
+      this.trackingIntervals = [];
     }
     this.isTracking = false;
   }

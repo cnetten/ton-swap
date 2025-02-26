@@ -44,8 +44,6 @@ function calculateSwapOutput(inputAmount, pool, inputTokenId, outputTokenId) {
       inputDecimals === 9 &&
       outputDecimals === 9
     ) {
-      console.log(`Token(9 dec) to TON swap - Input: ${inputAmount}`);
-
       // Calculate with scaling factor to fix the constant output issue
       const inputAmountBN = BigInt(inputAmount);
       const inputReserveBN = BigInt(inputReserve);
@@ -61,16 +59,12 @@ function calculateSwapOutput(inputAmount, pool, inputTokenId, outputTokenId) {
 
       const inputWithFee = (inputAmountBN * (10000n - feeBPS)) / 10000n;
 
-      // Calculate output using constant product formula
       const numerator = outputReserveBN * inputWithFee;
       const denominator = inputReserveBN + inputWithFee + 1n;
 
       if (denominator <= 0n) return "0";
 
       const outputAmount = numerator / denominator;
-
-      // Scale the output proportionally to the input amount
-      console.log(`Calculated output: ${outputAmount}`);
 
       return outputAmount.toString();
     }

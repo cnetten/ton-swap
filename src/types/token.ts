@@ -11,3 +11,10 @@ export interface Token {
     customPayloadApiUri?: string;
   };
 }
+
+export type JettonBalances = {
+  symbol: string;
+  balance: string;
+  jettonAddress: string;
+  image: string;
+}[];

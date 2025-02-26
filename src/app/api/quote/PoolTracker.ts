@@ -41,27 +41,27 @@ interface StonFiPool {
   apy_1d: string;
   apy_30d: string;
   apy_7d: string;
-  collected_token0_protocol_fee: string;
-  collected_token1_protocol_fee: string;
+  collectedToken0ProtocolFee: string;
+  collectedToken1ProtocolFee: string;
   deprecated: boolean;
-  lp_account_address: string;
-  lp_balance: string;
-  lp_fee: string;
-  lp_price_usd: string;
-  lp_total_supply: string;
-  lp_total_supply_usd: string;
-  lp_wallet_address: string;
+  lpAccountAddress: string;
+  lpBalance: string;
+  lpFee: string;
+  lpPriceUsd: string;
+  lpTotalSupply: string;
+  lpTotalSupplyUsd: string;
+  lpWalletAddress: string;
   popularity_index: number;
-  protocol_fee: string;
-  protocol_fee_address: string;
+  protocolFee: string;
+  protocolFeeAddress: string;
   ref_fee: string;
   reserve0: string;
   reserve1: string;
   router_address: string;
-  token0_address: string;
-  token0_balance: string;
-  token1_address: string;
-  token1_balance: string;
+  token0Address: string;
+  token0Balance: string;
+  token1Address: string;
+  token1Balance: string;
 }
 
 interface StonFiPoolsResponse {
@@ -221,7 +221,6 @@ class PoolTracker extends EventEmitter {
   public async updateBulkPoolStates(pools: Pool[]): Promise<void> {
     if (pools.length === 0) return;
 
-    console.log(`Fast updating ${pools.length} pools`);
     const startTime = Date.now();
 
     // Update in-memory pools first (this is fast)
@@ -277,22 +276,6 @@ class PoolTracker extends EventEmitter {
         const updatedPools = Array.from(poolMap.values());
         this.inMemoryPools.set(source, updatedPools);
         this.lastUpdateTime.set(source, Date.now());
-
-        // Log memory update stats
-        console.log(
-          `Updated in-memory ${source} pools: ${updatedPools.length} total`
-        );
-        console.log(
-          `- Pools with assets: ${
-            updatedPools.filter((p) => p.assets && p.assets.length > 0).length
-          }`
-        );
-        console.log(
-          `- Pools with reserves: ${
-            updatedPools.filter((p) => p.reserves && p.reserves.length > 0)
-              .length
-          }`
-        );
       }
 
       // Emit events immediately for in-memory updates
@@ -300,7 +283,6 @@ class PoolTracker extends EventEmitter {
 
       // For instant operation, we can return here and let database updates happen asynchronously
       const inMemoryDuration = Date.now() - startTime;
-      console.log(`In-memory update completed in ${inMemoryDuration}ms`);
 
       // Start database update in the background
       this.updatePoolsDatabase(pools).catch((error) => {
@@ -317,7 +299,6 @@ class PoolTracker extends EventEmitter {
   // Separate method for database operations
   private async updatePoolsDatabase(pools: Pool[]): Promise<void> {
     const startTime = Date.now();
-    console.log(`Starting database update for ${pools.length} pools`);
 
     const CHUNK_SIZE = 25;
     const chunks = [];
@@ -325,10 +306,6 @@ class PoolTracker extends EventEmitter {
     for (let i = 0; i < pools.length; i += CHUNK_SIZE) {
       chunks.push(pools.slice(i, i + CHUNK_SIZE));
     }
-
-    console.log(
-      `Split ${pools.length} pools into ${chunks.length} chunks for database update`
-    );
 
     try {
       const PARALLEL_CHUNKS = 5;
@@ -409,7 +386,6 @@ class PoolTracker extends EventEmitter {
       }
 
       const duration = Date.now() - startTime;
-      console.log(`Database update completed in ${duration}ms`);
     } catch (error) {
       console.error("Database update error:", error);
       throw error;
@@ -441,10 +417,10 @@ class PoolTracker extends EventEmitter {
 
     try {
       const [asset0, asset1] = await Promise.all([
-        stonfiPool.token0_address
+        stonfiPool.token0Address
           ? stonfiClient.getAsset(stonfiPool.token0Address)
           : null,
-        stonfiPool.token1_address
+        stonfiPool.token1Address
           ? stonfiClient.getAsset(stonfiPool.token1Address)
           : null,
       ]);
@@ -477,12 +453,12 @@ class PoolTracker extends EventEmitter {
     const assets: TokenAsset[] = [
       {
         type: asset0Type,
-        address: stonfiPool.token0_address,
+        address: stonfiPool.token0Address,
         metadata: token0Metadata,
       },
       {
         type: asset1Type,
-        address: stonfiPool.token1_address,
+        address: stonfiPool.token1Address,
         metadata: token1Metadata,
       },
     ];
@@ -504,7 +480,10 @@ class PoolTracker extends EventEmitter {
           stonfiPool.collectedToken0ProtocolFee,
           stonfiPool.collectedToken1ProtocolFee,
         ],
-        volume: [stonfiPool.token0_balance, stonfiPool.token1_balance],
+        volume: [
+          stonfiPool.token0Balance || "0",
+          stonfiPool.token1Balance || "0",
+        ],
       },
       source: "stonfi",
       lastUpdateTimestamp: Date.now(),
@@ -517,8 +496,6 @@ class PoolTracker extends EventEmitter {
       console.log("Already tracking, skipping additional start request");
       return;
     }
-
-    console.log("Starting fast pool tracking...");
 
     // Create clients once and reuse them
     const dedustSDK = new DeDustClient({
@@ -542,34 +519,17 @@ class PoolTracker extends EventEmitter {
     let consecutiveErrorCount = 0;
 
     // Fast update interval
-    const TRACKING_INTERVAL = 10000; // 10 seconds
-
-    console.log(
-      `Setting up fast tracking interval: ${TRACKING_INTERVAL}ms with full updates every ${FULL_UPDATE_INTERVAL}ms`
-    );
+    const TRACKING_INTERVAL = 5000; // 10 seconds
 
     this.trackingInterval = setInterval(async () => {
       // Skip this update cycle if the previous one is still running
       if (updateInProgress) {
-        console.log(
-          "Skipping update cycle - previous operation still in progress"
-        );
         return;
       }
 
       const cycleStartTime = Date.now();
       const needsFullUpdate =
         cycleStartTime - lastFullUpdateTime >= FULL_UPDATE_INTERVAL;
-
-      if (needsFullUpdate) {
-        console.log(
-          `Starting FULL update cycle at ${new Date().toISOString()}`
-        );
-      } else {
-        console.log(
-          `Starting FAST update cycle at ${new Date().toISOString()}`
-        );
-      }
 
       updateInProgress = true;
 
@@ -648,7 +608,6 @@ class PoolTracker extends EventEmitter {
                 i * BATCH_SIZE,
                 (i + 1) * BATCH_SIZE
               );
-              console.log(`Processing StonFi batch ${i + 1}/${numBatches}`);
 
               const batchResults = await Promise.all(
                 batch.map(async (pool) => {
@@ -779,9 +738,12 @@ class PoolTracker extends EventEmitter {
       if (!pool?.assets?.length || !pool?.reserves?.length || !pool?.stats) {
         return false;
       }
+      let tradeFee = parseFloat(pool.tradeFee || "0");
 
       // Check trade fee
-      const tradeFee = parseFloat(pool.tradeFee || "0");
+      if (pool.source === "stonfi" && tradeFee > 1) {
+        tradeFee = tradeFee / 100;
+      }
       if (tradeFee > maxTradeFee) {
         return false;
       }
@@ -849,19 +811,11 @@ class PoolTracker extends EventEmitter {
   }
 
   async getLatestPools(source: string): Promise<Pool[]> {
-    console.log(`Getting latest pools for ${source}...`);
-
     // Check if we have fresh in-memory data (less than 10 seconds old)
     if (this.inMemoryPools.has(source)) {
       const pools = this.inMemoryPools.get(source) || [];
       const lastUpdate = this.lastUpdateTime.get(source) || 0;
       const ageInSeconds = (Date.now() - lastUpdate) / 1000;
-
-      console.log(
-        `Found ${
-          pools.length
-        } in-memory pools for ${source}, age: ${ageInSeconds.toFixed(1)}s`
-      );
 
       // Only use in-memory data if it's fresh AND has content
       if (ageInSeconds < 10 && pools.length > 0) {
@@ -873,10 +827,6 @@ class PoolTracker extends EventEmitter {
             p.assets.length > 0 &&
             p.reserves &&
             p.reserves.length > 0
-        );
-
-        console.log(
-          `Valid in-memory pools: ${validPools.length}/${pools.length}`
         );
 
         if (validPools.length > 0) {
@@ -892,7 +842,6 @@ class PoolTracker extends EventEmitter {
     }
 
     // Fall back to database if needed
-    console.log(`Falling back to database for ${source} pools`);
     return this.getPoolsBySource(source);
   }
 
@@ -934,7 +883,6 @@ class PoolTracker extends EventEmitter {
           endpointUrl: "https://api.dedust.io",
         });
         dedustPools = await dedustSDK.getPools();
-        console.log(`Fetched ${dedustPools.length} pools from DeDust`);
       } catch (err) {
         console.error("Failed to fetch DeDust pools:", err);
       }
@@ -942,7 +890,6 @@ class PoolTracker extends EventEmitter {
       try {
         const stonfiClient = new StonApiClient();
         stonfiPools = await stonfiClient.getPools();
-        console.log(`Fetched ${stonfiPools?.length || 0} pools from StonFi`);
       } catch (err) {
         console.error("Failed to fetch StonFi pools:", err);
       }
@@ -973,8 +920,6 @@ class PoolTracker extends EventEmitter {
           }
         }
       }
-
-      console.log(`Processed ${allPools.length} pools total`);
 
       // Create a map for quick lookup by address
       const poolMap = new Map<string, Pool>();
@@ -1014,9 +959,6 @@ class PoolTracker extends EventEmitter {
         }
       }
 
-      console.log(`Fixed ${fixedCount} records with API data`);
-      console.log(`Set defaults for ${defaultsCount} records`);
-
       // Check for any remaining incomplete records
       const remainingCount = await this.db.countDocuments({
         $or: [
@@ -1025,9 +967,6 @@ class PoolTracker extends EventEmitter {
           { assets: { $exists: false } },
         ],
       });
-
-      console.log(`Remaining incomplete records: ${remainingCount}`);
-      console.log("Database fix completed");
     } catch (error) {
       console.error("Error fixing incomplete records:", error);
       throw error;

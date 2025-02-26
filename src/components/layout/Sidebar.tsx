@@ -129,23 +129,26 @@ export const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
                   />
                   <span>{balance} TON</span>
                 </div>
-                {jettonBalances.map((item) => (
-                  <div
-                    key={item.jettonAddress}
-                    className="flex items-center gap-2 text-sm text-muted-foreground"
-                  >
-                    <Image
-                      src={item.image}
-                      width={20}
-                      height={20}
-                      alt={item.symbol}
-                      className="rounded-full w-4 h-4"
-                    />
-                    <span>
-                      {item.balance} {item.symbol}
-                    </span>
-                  </div>
-                ))}
+                {jettonBalances
+                  .slice()
+                  .sort((a, b) => parseFloat(b.balance) - parseFloat(a.balance)) // Sort by balance, highest first
+                  .map((item) => (
+                    <div
+                      key={item.jettonAddress}
+                      className="flex items-center gap-2 text-sm text-muted-foreground"
+                    >
+                      <Image
+                        src={item.image}
+                        width={20}
+                        height={20}
+                        alt={item.symbol}
+                        className="rounded-full w-4 h-4"
+                      />
+                      <span>
+                        {item.balance} {item.symbol}
+                      </span>
+                    </div>
+                  ))}
               </>
             )}
           </div>

@@ -39,6 +39,42 @@ function calculateSwapOutput(inputAmount, pool, inputTokenId, outputTokenId) {
     const outputDecimals =
       pool.assets[outputTokenIndex].metadata?.decimals || 9;
 
+    if (
+      outputTokenId === "native" &&
+      inputDecimals === 9 &&
+      outputDecimals === 9
+    ) {
+      console.log(`Token(9 dec) to TON swap - Input: ${inputAmount}`);
+
+      // Calculate with scaling factor to fix the constant output issue
+      const inputAmountBN = BigInt(inputAmount);
+      const inputReserveBN = BigInt(inputReserve);
+      const outputReserveBN = BigInt(outputReserve);
+
+      // Apply fee
+      let feeBPS;
+      if (pool.source === "stonfi" && parseFloat(pool.tradeFee) > 1) {
+        feeBPS = BigInt(parseFloat(pool.tradeFee));
+      } else {
+        feeBPS = BigInt(Math.floor(parseFloat(pool.tradeFee) * 100));
+      }
+
+      const inputWithFee = (inputAmountBN * (10000n - feeBPS)) / 10000n;
+
+      // Calculate output using constant product formula
+      const numerator = outputReserveBN * inputWithFee;
+      const denominator = inputReserveBN + inputWithFee + 1n;
+
+      if (denominator <= 0n) return "0";
+
+      const outputAmount = numerator / denominator;
+
+      // Scale the output proportionally to the input amount
+      console.log(`Calculated output: ${outputAmount}`);
+
+      return outputAmount.toString();
+    }
+
     // Convert everything to BigInt with decimal normalization
     const inputAmountBN = BigInt(inputAmount);
     const inputReserveBN = BigInt(inputReserve);
@@ -64,12 +100,19 @@ function calculateSwapOutput(inputAmount, pool, inputTokenId, outputTokenId) {
     }
 
     // Apply fee
-    const feeBPS = BigInt(Math.floor(parseFloat(pool.tradeFee) * 100));
+    let feeBPS;
+    if (pool.source === "stonfi" && parseFloat(pool.tradeFee) > 1) {
+      // StonFi sends fee directly in basis points (20 = 0.2%)
+      feeBPS = BigInt(parseFloat(pool.tradeFee));
+    } else {
+      // DeDust sends fee as a percentage (0.25 = 0.25%)
+      feeBPS = BigInt(Math.floor(parseFloat(pool.tradeFee) * 100));
+    }
     const inputWithFee = (workingInputAmount * (10000n - feeBPS)) / 10000n;
 
     let outputAmount;
 
-    if (pool.type === "volatile") {
+    if (pool.type === "volatile" || pool.type === "stonfi") {
       // Constant Product formula: x * y = k
       const numerator = workingOutputReserve * inputWithFee;
       const denominator = workingInputReserve + inputWithFee + 1n;
@@ -161,11 +204,12 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
     pathReadable: `${fromSymbol} → ${toSymbol}`,
     pools: [directPool],
     outputAmount,
-    estimatedOutput: formatPrice(inputAmount, outputAmount),
+    // FIX: Don't use formatPrice for estimatedOutput, the raw amount will be formatted in route.ts
+    estimatedOutput: outputAmount,
     inputAmount: inputAmount,
     minimumAmountOut: Number(outputAmount) * 0.995, // 0.5% slippage
     estimatedGasFees: 0,
-    outPerIn: formatPrice(inputAmount, outputAmount),
+    outPerIn: formatPrice(inputAmount, outputAmount), // Keep using formatPrice for price ratio
     pathDepth: 1,
     outPutMint: toToken,
   };
@@ -246,6 +290,8 @@ function findPathsFromNode(
       nextNode
     );
 
+    if (outputAmount === "0" || outputAmount.startsWith("-")) continue;
+
     if (outputAmount === "0") continue;
 
     visited.add(nextNode);
@@ -262,14 +308,15 @@ function findPathsFromNode(
         })
         .join(" → ");
 
+      // Standard path handling (unchanged)
       allPaths.push({
         path: [...currentPath],
         pathReadable: readablePath,
         pools: [...currentPools],
         outputAmount,
-        estimatedOutput: formatPrice(workerData.inputAmount, outputAmount),
+        estimatedOutput: outputAmount,
         inputAmount: workerData.inputAmount,
-        minimumAmountOut: Number(outputAmount) * 0.995, // 0.5% slippage
+        minimumAmountOut: Number(outputAmount) * 0.995,
         estimatedGasFees: 0,
         outPerIn: formatPrice(workerData.inputAmount, outputAmount),
         pathDepth: currentPath.length - 1,
@@ -329,6 +376,8 @@ if (parentPort) {
 
   // Sort by output amount and prefer shorter paths when outputs are similar
   allPaths.sort((a, b) => {
+    if (a.outputAmount.startsWith("-")) return 1;
+    if (b.outputAmount.startsWith("-")) return -1;
     const outputDiff = Number(b.outputAmount) - Number(a.outputAmount);
     // If outputs are within 1% of each other, prefer shorter path
     if (Math.abs(outputDiff) < Number(b.outputAmount) * 0.01) {
@@ -337,6 +386,11 @@ if (parentPort) {
     return outputDiff;
   });
 
-  const bestPaths = allPaths.slice(0, 1);
+  const validPaths = allPaths.filter(
+    (path) =>
+      !path.outputAmount.startsWith("-") && BigInt(path.outputAmount) > 0n
+  );
+
+  const bestPaths = validPaths.length > 0 ? validPaths.slice(0, 1) : [];
   parentPort.postMessage({ paths: bestPaths });
 }

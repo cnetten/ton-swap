@@ -418,28 +418,6 @@ export async function POST(req: Request) {
       source: bestPath.source, // Include the source in the result
     };
 
-    if (
-      fromDecimals === 9 &&
-      bestPath.path &&
-      bestPath.path[bestPath.path.length - 1] === "native"
-    ) {
-      bestPath.outputAmount = (
-        BigInt(bestPath.outputAmount) / BigInt(1000)
-      ).toString();
-
-      formattedPath.estimatedOutput = normalizeAmount(
-        bestPath.outputAmount,
-        toDecimals
-      );
-      formattedPath.minimumAmountOut =
-        Number(formattedPath.estimatedOutput) -
-        Number(formattedPath.estimatedOutput) * slippageDecimal;
-      formattedPath.outPerIn = (
-        Number(formattedPath.estimatedOutput) /
-        Number(normalizeAmount(bestPath.inputAmount, fromDecimals))
-      ).toFixed(9);
-    }
-
     return NextResponse.json({
       swapPaths: [formattedPath],
       exchangeComparison: {

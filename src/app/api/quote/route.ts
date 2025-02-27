@@ -113,69 +113,6 @@ function buildPoolGraph(filteredPools: Pool[]) {
   return { poolGraph, poolsByPair };
 }
 
-const filterPoolsByLiquidity = (
-  pools: Pool[],
-  minReserve: number,
-  slippageTolerance: number = 0.005
-): Pool[] => {
-  const maxTradeFee = 0.5; // Convert to percentage
-  console.log(`Filtering pools with trade fee > ${maxTradeFee}%`);
-
-  return pools.filter((pool) => {
-    // Basic pool validation
-    if (!pool?.assets?.length || !pool?.reserves?.length || !pool?.stats) {
-      return false;
-    }
-
-    // Check trade fee against slippage tolerance
-    const tradeFee = parseFloat(pool.tradeFee || "0");
-    if (tradeFee > maxTradeFee) {
-      return false;
-    }
-
-    // Validate pool structure
-    if (pool.assets.length !== 2 || pool.reserves.length !== 2) {
-      return false;
-    }
-
-    // Validate assets
-    for (const asset of pool.assets) {
-      if (asset.type === "native") continue;
-      if (!asset.metadata?.symbol || asset.metadata?.name?.includes("Stake")) {
-        return false;
-      }
-    }
-
-    // Validate and check reserves
-    try {
-      const [reserve1, reserve2] = pool.reserves.map((r) => parseFloat(r));
-      if (
-        isNaN(reserve1) ||
-        isNaN(reserve2) ||
-        reserve1 < minReserve ||
-        reserve2 < minReserve
-      ) {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-
-    // Check trading activity - only if it's DeDust pools as StonFi might not have this data structure
-    if (pool.source === "dedust" || !pool.source) {
-      const totalVolume = pool.stats.volume
-        .map((v) => parseFloat(v) || 0)
-        .reduce((a, b) => a + b, 0);
-
-      if (totalVolume === 0) {
-        return false;
-      }
-    }
-
-    return true;
-  });
-};
-
 // Process and find best paths for each exchange source separately
 async function findBestPathsBySource(
   fromAddress: string,

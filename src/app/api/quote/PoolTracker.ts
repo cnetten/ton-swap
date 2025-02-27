@@ -146,11 +146,11 @@ class PoolTracker extends EventEmitter {
 
       // Connect with proper options for connection pooling
       this.mongoClient = await MongoClient.connect(this.mongoUri, {
-        maxPoolSize: 10,
-        minPoolSize: 2,
-        connectTimeoutMS: 5000,
-        socketTimeoutMS: 45000,
-        waitQueueTimeoutMS: 2000,
+        maxPoolSize: 20,
+        minPoolSize: 5,
+        connectTimeoutMS: 10000,
+        socketTimeoutMS: 60000,
+        waitQueueTimeoutMS: 10000,
       });
 
       const db = this.mongoClient.db();
@@ -522,7 +522,7 @@ class PoolTracker extends EventEmitter {
       if (fastUpdateInProgress) {
         return;
       }
-
+      const CACHE_MAX_AGE = 15 * 1000; // 15 seconds max age
       // Skip if it's time for a full update and one is about to start
       const now = Date.now();
       if (
@@ -530,6 +530,13 @@ class PoolTracker extends EventEmitter {
         !fullUpdateInProgress
       ) {
         return;
+      }
+
+      for (const [source, lastUpdate] of this.lastUpdateTime.entries()) {
+        if (now - lastUpdate > CACHE_MAX_AGE) {
+          console.log(`Detected stale cache for ${source}, forcing refresh`);
+          this.forceRefreshPools(source);
+        }
       }
 
       fastUpdateInProgress = true;
@@ -1090,6 +1097,28 @@ class PoolTracker extends EventEmitter {
     } catch (error) {
       console.error("Error fixing incomplete records:", error);
       throw error;
+    }
+  }
+  public async forceRefreshPools(source?: string): Promise<void> {
+    if (source) {
+      // Clear specific source
+      this.inMemoryPools.delete(source);
+      this.lastUpdateTime.delete(source);
+      console.log(`Forced refresh of ${source} pools cache`);
+
+      // Immediately repopulate from database
+      await this.getPoolsBySource(source);
+    } else {
+      // Clear all sources
+      const sources = Array.from(this.inMemoryPools.keys());
+      this.inMemoryPools.clear();
+      this.lastUpdateTime.clear();
+      console.log("Forced refresh of all pools cache");
+
+      // Immediately repopulate all sources
+      for (const src of sources) {
+        await this.getPoolsBySource(src);
+      }
     }
   }
 }

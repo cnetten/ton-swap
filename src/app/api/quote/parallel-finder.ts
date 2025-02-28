@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { Worker } from "worker_threads";
 import path from "path";
 import type { Pool, PathWithCost } from "./types";

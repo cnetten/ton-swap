@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { findSwapPathsParallel } from "./parallel-finder";
 import { initializePoolService } from "../init";

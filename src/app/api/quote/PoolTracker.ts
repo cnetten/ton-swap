@@ -522,22 +522,6 @@ class PoolTracker extends EventEmitter {
       if (fastUpdateInProgress) {
         return;
       }
-      const CACHE_MAX_AGE = 15 * 1000; // 15 seconds max age
-      // Skip if it's time for a full update and one is about to start
-      const now = Date.now();
-      if (
-        now - lastFullUpdateTime >= FULL_UPDATE_INTERVAL &&
-        !fullUpdateInProgress
-      ) {
-        return;
-      }
-
-      for (const [source, lastUpdate] of this.lastUpdateTime.entries()) {
-        if (now - lastUpdate > CACHE_MAX_AGE) {
-          console.log(`Detected stale cache for ${source}, forcing refresh`);
-          this.forceRefreshPools(source);
-        }
-      }
 
       fastUpdateInProgress = true;
 
@@ -546,7 +530,7 @@ class PoolTracker extends EventEmitter {
           await this.connect();
         }
 
-        // Fetch from both DeDust and StonFi in parallel
+        // Fetch from both DeDust and StonFi in parallel - THIS IS THE PRIMARY SOURCE OF TRUTH
         const [dedustPools, stonfiResponse] = await Promise.all([
           dedustSDK.getPools().catch((err) => {
             console.error("Error fetching DeDust pools for fast update:", err);
@@ -558,111 +542,108 @@ class PoolTracker extends EventEmitter {
           }),
         ]);
 
-        // Process DeDust pools (just the price-critical data)
-        const pricePools = dedustPools.map((pool) => ({
-          address: pool.address,
-          reserves: pool.reserves,
-          lastPrice: pool.lastPrice,
+        // Process DeDust pools with basic data needed for fast updates
+        const taggedDedustPools = dedustPools.map((pool) => ({
+          ...pool,
           source: "dedust",
           lastUpdateTimestamp: Date.now(),
-        })) as unknown as Pool[];
+        }));
 
-        // Process StonFi pools (price-critical data only)
+        // Process StonFi pools with basic data needed for fast updates
+        const stonfiPools: Pool[] = [];
         if (stonfiResponse && Array.isArray(stonfiResponse)) {
-          const stonfiPricePools = stonfiResponse
-            .filter((pool) => !pool.deprecated)
-            .map((pool) => ({
-              address: pool.address,
-              reserves: [pool.reserve0, pool.reserve1],
-              source: "stonfi",
-              lastUpdateTimestamp: Date.now(),
-            })) as unknown as Pool[];
-
-          // Combine pools from both sources
-          pricePools.push(...stonfiPricePools);
+          stonfiPools.push(
+            ...(stonfiResponse
+              .filter((pool) => !pool.deprecated)
+              .map((pool) => ({
+                address: pool.address,
+                reserves: [pool.reserve0, pool.reserve1],
+                source: "stonfi",
+                lastUpdateTimestamp: Date.now(),
+              })) as unknown as Pool[])
+          );
         }
 
-        // Fast update in-memory only to maintain responsiveness
-        if (pricePools.length > 0) {
-          // Always update in-memory data first for immediate use
-          try {
-            // Group pools by source
-            const poolsBySource = new Map<string, Pool[]>();
-            for (const pool of pricePools) {
-              if (pool.source) {
-                if (!poolsBySource.has(pool.source)) {
-                  poolsBySource.set(pool.source, []);
-                }
-                poolsBySource.get(pool.source)!.push(pool);
+        // CRITICAL: Always update the in-memory data first with the API results
+        const allApiPools: Record<string, Pool[]> = {
+          dedust: taggedDedustPools as unknown as Pool[],
+          stonfi: stonfiPools,
+        };
+
+        // Update in-memory cache for each source
+        for (const [source, sourcePools] of Object.entries(allApiPools)) {
+          if (sourcePools && sourcePools.length > 0) {
+            // Get existing in-memory pools for this source
+            const currentPools = this.inMemoryPools.get(source) || [];
+
+            // Create a map for fast lookup of existing pools by address
+            const poolMap = new Map<string, Pool>();
+            for (const pool of currentPools) {
+              poolMap.set(pool.address, pool);
+            }
+
+            let updatedCount = 0;
+            let addedCount = 0;
+
+            // Update existing or add new pools
+            for (const pool of sourcePools) {
+              // Get existing pool first
+              const existingPool = poolMap.get(pool.address);
+
+              if (existingPool) {
+                // Merge the update with existing data to preserve metadata
+                poolMap.set(pool.address, {
+                  ...existingPool, // Keep existing fields
+                  ...pool, // Apply updates from API
+                  // Ensure critical fields are preserved from existing data if not in API update
+                  assets: pool.assets || existingPool.assets,
+                  reserves: pool.reserves || existingPool.reserves,
+                  stats: pool.stats || existingPool.stats,
+                  lastUpdateTimestamp: Date.now(),
+                });
+                updatedCount++;
+              } else {
+                // For new pools, add them directly
+                poolMap.set(pool.address, {
+                  ...pool,
+                  lastUpdateTimestamp: Date.now(),
+                });
+                addedCount++;
               }
             }
 
-            // Update in-memory pools for each source
-            for (const [source, sourcePools] of poolsBySource.entries()) {
-              // Get current pools for this source (or empty array)
-              const currentPools = this.inMemoryPools.get(source) || [];
+            // Convert back to array and store in memory
+            const updatedPools = Array.from(poolMap.values());
+            this.inMemoryPools.set(source, updatedPools);
+            this.lastUpdateTime.set(source, Date.now());
 
-              // Create map for fast lookup of existing pools
-              const poolMap = new Map<string, Pool>();
-              for (const pool of currentPools) {
-                poolMap.set(pool.address, pool);
-              }
-
-              // Update existing or add new pools
-              for (const pool of sourcePools) {
-                // Get existing pool first
-                const existingPool = poolMap.get(pool.address);
-
-                if (existingPool) {
-                  // Merge the update with existing data instead of replacing everything
-                  poolMap.set(pool.address, {
-                    ...existingPool,
-                    ...pool,
-                    assets: pool.assets || existingPool.assets,
-                    reserves: pool.reserves || existingPool.reserves,
-                    stats: pool.stats || existingPool.stats,
-                    lastUpdateTimestamp: Date.now(),
-                  });
-                } else {
-                  poolMap.set(pool.address, {
-                    ...pool,
-                    lastUpdateTimestamp: Date.now(),
-                  });
-                }
-              }
-
-              // Convert back to array and store
-              const updatedPools = Array.from(poolMap.values());
-              this.inMemoryPools.set(source, updatedPools);
-              this.lastUpdateTime.set(source, Date.now());
-            }
+            console.log(
+              `Updated in-memory cache for ${source}: ${updatedCount} updated, ${addedCount} added, total: ${updatedPools.length}`
+            );
 
             // Emit events for in-memory updates
-            pricePools.forEach((pool) => this.emit("poolStateUpdated", pool));
-
-            if (!fullUpdateInProgress) {
-              this.updatePoolsDatabase(pricePools).catch((error) => {
-                console.error("Background database update failed:", error);
-              });
-              console.log(
-                `Fast update: Updated ${pricePools.length} pools in memory and database`
-              );
-            } else {
-              console.log(
-                `Fast update: Updated ${pricePools.length} pools in memory only (full update in progress)`
-              );
-            }
-          } catch (error) {
-            console.error("In-memory update error:", error);
+            sourcePools.forEach((pool) => this.emit("poolStateUpdated", pool));
+          } else {
+            console.warn(
+              `No ${source} pools received from API in this update cycle`
+            );
           }
-
-          consecutiveErrorCount = 0;
         }
+
+        // Then update the database in the background (don't wait for it)
+        const allPools = [...taggedDedustPools, ...stonfiPools];
+        if (allPools.length > 0) {
+          this.updatePoolsDatabase(allPools).catch((error) => {
+            console.error("Background database update failed:", error);
+          });
+        }
+
+        consecutiveErrorCount = 0;
       } catch (error) {
-        console.error("Fast price update error:", error);
+        console.error("Fast update error:", error);
         consecutiveErrorCount++;
 
-        // Reconnect logic for consistent errors (shared with full update)
+        // Reconnect logic for consistent errors
         if (consecutiveErrorCount >= 20) {
           console.log(
             "Too many consecutive errors, attempting to reconnect to MongoDB..."
@@ -938,38 +919,179 @@ class PoolTracker extends EventEmitter {
   }
 
   async getLatestPools(source: string): Promise<Pool[]> {
-    // Check if we have fresh in-memory data (less than 10 seconds old)
+    // ALWAYS check in-memory cache first
     if (this.inMemoryPools.has(source)) {
       const pools = this.inMemoryPools.get(source) || [];
       const lastUpdate = this.lastUpdateTime.get(source) || 0;
       const ageInSeconds = (Date.now() - lastUpdate) / 1000;
 
-      // Only use in-memory data if it's fresh AND has content
-      if (ageInSeconds < 10 && pools.length > 0) {
-        // Verify pools have required data
+      // Only use in-memory data if it has content
+      if (pools.length > 0) {
+        // Verify pools have the minimum required data structure
         const validPools = pools.filter(
           (p) =>
             p &&
-            p.assets &&
-            p.assets.length > 0 &&
-            p.reserves &&
-            p.reserves.length > 0
+            p.address &&
+            // Either we have reserves data OR we have assets data
+            ((p.reserves && p.reserves.length > 0) ||
+              (p.assets && p.assets.length > 0))
         );
 
         if (validPools.length > 0) {
-          return pools;
-        } else {
           console.log(
-            `In-memory pools for ${source} missing critical data, falling back to database`
+            `Using in-memory cache for ${source} (age: ${ageInSeconds.toFixed(
+              1
+            )}s, pools: ${pools.length})`
           );
+
+          // If the data is getting stale (> 30s), trigger a background refresh but don't wait for it
+          if (ageInSeconds > 30) {
+            console.log(
+              `Cache for ${source} is getting stale (${ageInSeconds.toFixed(
+                1
+              )}s), triggering background refresh`
+            );
+            this.refreshPoolsFromDatabase(source).catch((err) => {
+              console.error(`Background refresh for ${source} failed:`, err);
+            });
+          }
+
+          return pools;
         }
+        console.log(
+          `In-memory pools for ${source} have incomplete data, checking connection status`
+        );
+      } else {
+        console.log(
+          `Empty in-memory pool cache for ${source}, checking connection status`
+        );
       }
     } else {
-      console.log(`No in-memory pools found for ${source}`);
+      console.log(
+        `No in-memory pools found for ${source}, checking connection status`
+      );
     }
 
-    // Fall back to database if needed
-    return this.getPoolsBySource(source);
+    // CRITICAL: Check if a connection is in progress and return any available memory data rather than waiting
+    if (this.connectionInProgress) {
+      console.log(
+        `MongoDB connection in progress, returning available memory data for ${source}`
+      );
+      const availablePools = this.inMemoryPools.get(source) || [];
+      if (availablePools.length > 0) {
+        return availablePools;
+      }
+      console.log(
+        `No memory data available for ${source} while connection is in progress`
+      );
+    }
+
+    // Fall back to database if memory doesn't have valid data and we can connect quickly
+    try {
+      // Try to connect but don't block for too long
+      const connectPromise = this.connect();
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("DB connection timeout")), 500);
+      });
+
+      // Race connection vs timeout
+      try {
+        await Promise.race([connectPromise, timeoutPromise]);
+      } catch (connError) {
+        console.warn(
+          `Database connection taking too long, returning available memory data for ${source}`
+        );
+        const availablePools = this.inMemoryPools.get(source) || [];
+        if (availablePools.length > 0) {
+          // Schedule background refresh
+          connectPromise
+            .then(() => {
+              this.refreshPoolsFromDatabase(source).catch((err) => {
+                console.error(
+                  `Background refresh after connection for ${source} failed:`,
+                  err
+                );
+              });
+            })
+            .catch(() => {});
+          return availablePools;
+        }
+        console.log(
+          `No memory data available for ${source} and DB connection is slow`
+        );
+        // Continue with normal flow, might need to wait for connection
+      }
+
+      // Only proceed with database query if we're connected
+      if (!this.db) {
+        console.warn(
+          `No database connection available for ${source}, returning available memory data`
+        );
+        return this.inMemoryPools.get(source) || [];
+      }
+
+      const startTime = Date.now();
+      const results = await this.db.find({ source }).toArray();
+      const pools = results.map((doc) => doc as unknown as Pool);
+      const dbQueryTime = Date.now() - startTime;
+
+      console.log(
+        `Loaded ${pools.length} pools for ${source} from database in ${dbQueryTime}ms`
+      );
+
+      // Store in memory for future use
+      if (pools.length > 0) {
+        this.inMemoryPools.set(source, pools);
+        this.lastUpdateTime.set(source, Date.now());
+        console.log(
+          `Refreshed in-memory cache for ${source} with ${pools.length} pools from database`
+        );
+      } else {
+        console.warn(`No pools found in database for source ${source}`);
+      }
+
+      return pools;
+    } catch (error) {
+      console.error(`Error fetching pools from database for ${source}:`, error);
+
+      // If database fails but we have any in-memory data, use it
+      if (this.inMemoryPools.has(source)) {
+        const pools = this.inMemoryPools.get(source) || [];
+        console.log(
+          `Database error - using available in-memory data for ${source} (${pools.length} pools)`
+        );
+        return pools;
+      }
+
+      // Return empty array as last resort
+      console.warn(`No data available for ${source} after all fallbacks`);
+      return [];
+    }
+  }
+
+  // Helper method to refresh pools from database in the background
+  private async refreshPoolsFromDatabase(source: string): Promise<void> {
+    try {
+      // Ensure we have a database connection
+      if (!this.db) {
+        await this.connect();
+      }
+
+      const results = await this.db.find({ source }).toArray();
+      const pools = results.map((doc) => doc as unknown as Pool);
+
+      if (pools.length > 0) {
+        // Update in-memory cache only if we got results
+        this.inMemoryPools.set(source, pools);
+        this.lastUpdateTime.set(source, Date.now());
+        console.log(
+          `Background refresh: updated in-memory cache for ${source} with ${pools.length} pools`
+        );
+      }
+    } catch (error) {
+      console.error(`Background refresh failed for ${source}:`, error);
+      throw error;
+    }
   }
 
   async fixIncompleteRecords(): Promise<void> {

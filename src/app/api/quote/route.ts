@@ -390,7 +390,14 @@ export async function POST(req: Request) {
           "An unexpected error occurred while requesting the swap quote",
         details: error?.stack,
       },
-      { status: error?.status || 500 }
+      {
+        status: error?.status || 500,
+        headers: {
+          "Cache-Control": "no-store, max-age=0, must-revalidate",
+          Pragma: "no-cache",
+          Expires: "0",
+        },
+      }
     );
   }
 }

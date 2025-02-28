@@ -9,13 +9,13 @@ export async function findSwapPathsParallel(
   to: string,
   inputAmount: string,
   maxDepth = 4,
-  maxPaths = 1
+  maxPaths = 1,
+  protocol = "dedust"
 ): Promise<PathWithCost[]> {
   try {
     // Get initial set of nodes to distribute work
     const startNodes = Array.from(graph.get(from)?.keys() || []);
     if (startNodes.length === 0) return [];
-
     // Prepare data for workers
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serializedGraph: any = {};
@@ -145,7 +145,15 @@ function calculateInitialSwapOutput(
     const inputAmountBN = BigInt(inputAmount);
     const inputReserveBN = BigInt(inputReserve);
     const outputReserveBN = BigInt(outputReserve);
-    const feeBPS = BigInt(Math.floor(parseFloat(pool.tradeFee) * 100));
+    let feeBPS;
+
+    if (pool.source === "stonfi") {
+      // StonFi sends fee directly in basis points (20 = 0.2%)
+      feeBPS = BigInt(parseFloat(pool.tradeFee));
+    } else {
+      // DeDust sends fee as a percentage (0.25 = 0.25%)
+      feeBPS = BigInt(Math.floor(parseFloat(pool.tradeFee) * 100));
+    }
     const BPS_DENOMINATOR = BigInt(10000);
 
     if (

@@ -330,7 +330,7 @@ export async function POST(req: Request) {
                 pathDepth: bestStonfiPath.pathDepth,
               }
             : null,
-        },
+        }, // Include the source in the result
       });
     }
 

@@ -18,6 +18,7 @@ export interface Pool {
     fees: string[];
     volume: string[];
   };
+  source?: string;
 }
 
 export interface PathWithCost {

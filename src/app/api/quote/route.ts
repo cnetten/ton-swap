@@ -9,6 +9,10 @@ import { PoolService } from "./PoolTracker";
 // Initialize on first request
 let initialized = false;
 
+// Define a constant for the fast update interval
+const FAST_UPDATE_INTERVAL = 3000; // 3 seconds
+const FULL_UPDATE_INTERVAL = 60000; // 60 seconds
+
 interface Pool {
   address: string;
   lt: string;
@@ -129,6 +133,12 @@ async function findBestPathsBySource(
   const tracker = poolService.getTracker();
 
   console.log("Fetching pools from all sources...");
+
+  // Preload Redis chunks for both sources first
+  await Promise.all([
+    tracker.preloadRedisCache("dedust"),
+    tracker.preloadRedisCache("stonfi"),
+  ]);
 
   // Get pools from different sources
   const [dedustPools, stonfiPools] = await Promise.all([
@@ -256,8 +266,6 @@ export async function POST(req: Request) {
   if (!initialized) {
     await initializePoolService();
     initialized = true;
-    // Wait a bit for initial data
-    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
   try {
@@ -282,6 +290,17 @@ export async function POST(req: Request) {
         : toAddress;
 
     const poolService = PoolService.getInstance();
+    const tracker = poolService.getTracker();
+
+    // Trigger pool data update from APIs if needed
+    await tracker.triggerUpdateIfNeeded();
+
+    // Preload Redis chunks for both sources
+    await Promise.all([
+      tracker.preloadRedisCache("dedust"),
+      tracker.preloadRedisCache("stonfi"),
+    ]);
+
     const [dedustPools, stonfiPools] = await Promise.all([
       poolService.getPoolsBySource("dedust"),
       poolService.getPoolsBySource("stonfi"),

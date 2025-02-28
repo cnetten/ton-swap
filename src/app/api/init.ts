@@ -2,11 +2,6 @@ import { DeDustClient } from "@dedust/sdk";
 import { PoolService } from "./quote/PoolTracker";
 
 export async function initializePoolService() {
-  // Prevent multiple initializations in development
-  // if (process.env.NODE_ENV === "development" && global.poolServiceInitialized) {
-  //   return;
-  // }
-
   try {
     console.log("Initializing pool service...");
     const poolService = PoolService.getInstance();
@@ -14,72 +9,69 @@ export async function initializePoolService() {
     // Check if already initialized
     if (poolService.isInitialized()) {
       console.log("Pool service already initialized");
-
-      // Even if initialized, check pool health to ensure data is fresh
-      const tracker = poolService.getTracker();
-      const sources = ["dedust", "stonfi"];
-
-      // Force refresh pools from all sources
-      for (const source of sources) {
-        await tracker.forceRefreshPools(source);
-      }
-
       return;
     }
 
-    // Fetch initial pools from DeDust
-    const dedustSDK = new DeDustClient({
-      endpointUrl: "https://api.dedust.io",
+    // Get the tracker instance to prepare connections
+    const tracker = poolService.getTracker();
+
+    // Create a timeout promise to prevent hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(
+        () => reject(new Error("Pool service initialization timed out")),
+        10000
+      );
     });
 
-    console.log("Fetching initial pools from DeDust...");
-    const initialPools = await dedustSDK.getPools();
-    console.log(`Fetched ${initialPools.length} initial pools from DeDust`);
+    // Initialize with minimal data - don't wait for full data loading
+    // This makes a lightweight initialization that won't time out
+    const initializePromise = (async () => {
+      try {
+        // Just initialize the service with empty data first
+        await poolService.initialize([]);
+        console.log("Basic pool service initialization complete");
 
-    // Initialize pool service with initial pools
-    console.log("Initializing pool service with initial data...");
-    await poolService.initialize(initialPools);
+        // This tells Vercel we're done with the critical path
+        // Further initialization will happen in background
+        return true;
+      } catch (error) {
+        console.error("Failed to initialize basic pool service:", error);
+        throw error;
+      }
+    })();
 
-    // Ensure StonFi pools are also loaded
-    console.log("Preloading all pool sources...");
-    const sources = ["dedust", "stonfi"];
-    for (const source of sources) {
-      await poolService.getPoolsBySource(source);
-    }
+    // Race between initialization and timeout
+    await Promise.race([initializePromise, timeoutPromise]);
 
-    // Validate pool data quality
-    const tracker = poolService.getTracker();
-    const dedustCount = tracker.filterPoolsByLiquidity(
-      "dedust",
-      100000,
-      0.5
-    ).length;
-    const stonfiCount = tracker.filterPoolsByLiquidity(
-      "stonfi",
-      100000,
-      0.5
-    ).length;
+    // Background fetch initial data if needed - don't await this
+    setTimeout(async () => {
+      try {
+        console.log("Background fetching of initial pool data started");
+
+        // Fetch initial pools from DeDust
+        const dedustSDK = new DeDustClient({
+          endpointUrl: "https://api.dedust.io",
+        });
+
+        const initialPools = await dedustSDK.getPools();
+        console.log(`Fetched ${initialPools.length} initial pools from DeDust`);
+
+        // Trigger pool updates
+        await tracker.triggerUpdateIfNeeded();
+
+        console.log("Background pool data initialization complete");
+      } catch (backgroundError) {
+        console.error("Background data fetching failed:", backgroundError);
+        // Failures here won't affect the API response
+      }
+    }, 100);
 
     console.log(
-      `Initialized with ${dedustCount} DeDust pools and ${stonfiCount} StonFi pools`
+      "Pool service initialization in progress, continuing with request"
     );
-
-    if (dedustCount < 10 || stonfiCount < 10) {
-      console.warn("Suspiciously low pool count, forcing refresh");
-      await tracker.forceRefreshPools();
-    }
-
-    if (process.env.NODE_ENV === "development") {
-      global.poolServiceInitialized = true;
-    }
-
-    console.log("Pool service initialization complete");
+    return;
   } catch (error) {
     console.error("Failed to initialize pool service:", error);
     // Don't rethrow to prevent initialization failures from breaking the app
-    // But do ensure we don't mark as initialized if it failed
-    if (process.env.NODE_ENV === "development") {
-      global.poolServiceInitialized = false;
-    }
   }
 }

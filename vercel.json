@@ -1,11 +1,11 @@
 {
-  "cron": [
+  "crons": [
     {
-      "path": "src/app/api/update-pools?type=fast",
+      "path": "/src/app/api/update-pools?type=fast",
       "schedule": "*/1 * * * *"
     },
     {
-      "path": "src/app/api/update-pools?type=full",
+      "path": "/src/app/api/update-pools?type=full",
       "schedule": "0 * * * *"
     }
   ]

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { PoolService } from "../quote/PoolTracker";
 
-export async function POST(req: Request) {
+export async function GET(req: Request) {
   try {
     // Get the URL to parse query parameters
     const url = new URL(req.url);

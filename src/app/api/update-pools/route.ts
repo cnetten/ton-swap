@@ -1,26 +1,20 @@
-import type { NextApiRequest, NextApiResponse } from "next";
+import { NextResponse } from "next/server";
 import { PoolService } from "../quote/PoolTracker";
 
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
-  if (req.method !== "POST" && req.method !== "GET") {
-    return res.status(405).json({ message: "Method not allowed" });
-  }
-
+export async function POST(req: Request) {
   try {
+    // Get the URL to parse query parameters
+    const url = new URL(req.url);
+    const isFullUpdate = url.searchParams.get("type") === "full";
+
     const poolService = PoolService.getInstance();
     const tracker = poolService.getTracker();
-
-    // Determine if this is a full or fast update based on a query parameter
-    const isFullUpdate = req.query.type === "full";
 
     if (isFullUpdate) {
       // Perform full update
       await tracker.performFullUpdate();
 
-      return res.status(200).json({
+      return NextResponse.json({
         message: "Full pools update completed successfully",
         timestamp: Date.now(),
         type: "full",
@@ -29,7 +23,7 @@ export default async function handler(
       // Perform fast update
       await tracker.performFastUpdate();
 
-      return res.status(200).json({
+      return NextResponse.json({
         message: "Fast pools update completed successfully",
         timestamp: Date.now(),
         type: "fast",
@@ -37,9 +31,12 @@ export default async function handler(
     }
   } catch (error) {
     console.error("Pool update error:", error);
-    return res.status(500).json({
-      message: "Failed to update pools",
-      error: error instanceof Error ? error.message : "Unknown error",
-    });
+    return NextResponse.json(
+      {
+        message: "Failed to update pools",
+        error: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 }
+    );
   }
 }

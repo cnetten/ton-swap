@@ -1,7 +1,12 @@
 {
-  "functions": {
-    "src/app/api/quote": {
-      "maxDuration": 60
+  "cron": [
+    {
+      "path": "src/app/api/update-pools?type=fast",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "src/app/api/update-pools?type=full",
+      "schedule": "0 * * * *"
     }
-  }
+  ]
 }

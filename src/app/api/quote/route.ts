@@ -134,16 +134,10 @@ async function findBestPathsBySource(
 
   console.log("Fetching pools from all sources...");
 
-  // Preload Redis chunks for both sources first
-  await Promise.all([
-    tracker.preloadRedisCache("dedust"),
-    tracker.preloadRedisCache("stonfi"),
-  ]);
-
   // Get pools from different sources
   const [dedustPools, stonfiPools] = await Promise.all([
-    poolService.getPoolsBySource("dedust"),
-    poolService.getPoolsBySource("stonfi"),
+    poolService.getPoolsBySource("dedust", true), // Pass true to skip updates
+    poolService.getPoolsBySource("stonfi", true), // Pass true to skip updates
   ]);
 
   console.log(
@@ -290,20 +284,11 @@ export async function POST(req: Request) {
         : toAddress;
 
     const poolService = PoolService.getInstance();
-    const tracker = poolService.getTracker();
 
-    // Trigger pool data update from APIs if needed
-    await tracker.triggerUpdateIfNeeded();
-
-    // Preload Redis chunks for both sources
-    await Promise.all([
-      tracker.preloadRedisCache("dedust"),
-      tracker.preloadRedisCache("stonfi"),
-    ]);
-
+    // Pass skipUpdate=true to avoid triggering updates during quote requests
     const [dedustPools, stonfiPools] = await Promise.all([
-      poolService.getPoolsBySource("dedust"),
-      poolService.getPoolsBySource("stonfi"),
+      poolService.getPoolsBySource("dedust", true), // Skip updates
+      poolService.getPoolsBySource("stonfi", true), // Skip updates
     ]);
 
     // Combine all pools for decimals lookup
@@ -320,7 +305,7 @@ export async function POST(req: Request) {
     const slippageDecimal = (slippageTolerance || 0.5) / 100;
     console.log(`Using slippage tolerance: ${slippageDecimal * 100}%`);
 
-    // Find best paths for each exchange separately
+    // Find best paths for each exchange separately - this will now use skipUpdate=true internally
     const { bestDedustPath, bestStonfiPath, allFilteredPools } =
       await findBestPathsBySource(
         actualFromAddress,

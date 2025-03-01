@@ -65,6 +65,21 @@ interface StonFiPool {
   token1Balance: string;
 }
 
+interface DeDustPool {
+  address: string;
+  lt: string;
+  totalSupply: string;
+  type: string;
+  tradeFee: string;
+  assets: TokenAsset[];
+  lastPrice: any;
+  reserves: string[];
+  stats: {
+    fees: string[];
+    volume: string[];
+  };
+}
+
 interface StonFiPoolsResponse {
   pool_list: StonFiPool[];
 }
@@ -75,17 +90,15 @@ class PoolTracker extends EventEmitter {
   private poolAddresses: Set<string>;
   private isTracking: boolean = false;
   private trackingInterval: NodeJS.Timeout | null = null;
-  public readonly TRACK_INTERVAL = 3000; // 3 seconds
-  public readonly FAST_UPDATE_INTERVAL = 3000; // 3 seconds between fast updates
-  public readonly FULL_UPDATE_INTERVAL = 60000; // 60 seconds between full updates  private mongoClient: MongoClient | null = null;
+  private readonly FAST_UPDATE_INTERVAL = 3000; // 3 seconds between fast updates
+  private readonly FULL_UPDATE_INTERVAL = 60000; // 60 seconds between full updates
   private mongoClient: MongoClient | null = null;
-  y;
-
   private trackingIntervals: NodeJS.Timeout[] = [];
   private redis: Redis;
   private redisCacheData: Map<string, Pool[]> = new Map();
   private readonly CHUNK_SIZE = 200; // Number of pools per chunk, adjust as needed
   private readonly CHUNK_KEY_PREFIX = "pools:chunk:";
+  private readonly UPDATE_IN_PROGRESS_KEY = "updateInProgress";
 
   // Track if a connection is in progress to prevent multiple simultaneous connection attempts
   private connectionInProgress: Promise<void> | null = null;
@@ -113,13 +126,144 @@ class PoolTracker extends EventEmitter {
     this.performFullUpdate = async () => {};
   }
 
+  // Add a method to check if data has actually changed
+  private async hasDataChanged(
+    source: string,
+    newPools: Pool[]
+  ): Promise<boolean> {
+    try {
+      // First check the lastUpdate timestamp
+      const lastUpdateKey = `lastUpdate:${source}`;
+      const lastUpdateData = await this.redis.get(lastUpdateKey); // Removed <string> type
+
+      let lastUpdateValue: number | null = null;
+
+      if (typeof lastUpdateData === "string") {
+        lastUpdateValue = parseInt(lastUpdateData);
+      } else if (typeof lastUpdateData === "number") {
+        lastUpdateValue = lastUpdateData;
+      }
+
+      if (lastUpdateValue === null) {
+        // No previous update, data has changed
+        return true;
+      }
+
+      const now = Date.now();
+
+      // If last update was very recent (within 1 second), avoid duplicate updates
+      if (now - lastUpdateValue < 1000) {
+        console.log(
+          `Skipping Redis update for ${source}, last update was ${
+            now - lastUpdateValue
+          }ms ago`
+        );
+        return false;
+      }
+
+      // Get the metadata about chunks
+      const metadataKey = `pools:meta:${source}`;
+      const metadataData = await this.redis.get(metadataKey); // Removed <string> type
+
+      if (!metadataData) {
+        // No metadata, data has changed
+        return true;
+      }
+
+      // Parse metadata if it's a string
+      const metadata =
+        typeof metadataData === "string"
+          ? JSON.parse(metadataData)
+          : metadataData;
+
+      // Check if pool count has changed
+      if (metadata.totalPools !== newPools.length) {
+        console.log(
+          `Pool count changed for ${source}: ${metadata.totalPools} -> ${newPools.length}`
+        );
+        return true;
+      }
+
+      // Sample a few pools to check for changes
+      const sampleSize = Math.min(10, newPools.length);
+      const samples = [];
+
+      for (let i = 0; i < sampleSize; i++) {
+        const index = Math.floor(Math.random() * newPools.length);
+        samples.push(newPools[index]);
+      }
+
+      // Check these samples against Redis
+      for (const pool of samples) {
+        // Which chunk would this pool be in?
+        const chunkIndex = Math.floor(
+          newPools.findIndex((p) => p.address === pool.address) /
+            this.CHUNK_SIZE
+        );
+
+        if (chunkIndex < 0 || chunkIndex >= metadata.chunks) {
+          // Can't find the chunk, data has changed
+          return true;
+        }
+
+        const chunkKey = `${this.CHUNK_KEY_PREFIX}${source}:${chunkIndex}`;
+        const chunkData = await this.redis.get(chunkKey); // Removed <string> type
+
+        if (!chunkData) {
+          // Chunk missing, data has changed
+          return true;
+        }
+
+        // Parse chunk if it's a string
+        const chunkPools =
+          typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
+
+        const existingPool = chunkPools.find(
+          (p: Pool) => p.address === pool.address
+        );
+
+        if (!existingPool) {
+          // Pool not found, data has changed
+          return true;
+        }
+
+        // Check if reserves have changed - the most common change
+        if (pool.reserves && existingPool.reserves) {
+          if (pool.reserves.join(",") !== existingPool.reserves.join(",")) {
+            // Reserves changed, data has changed
+            return true;
+          }
+        }
+      }
+
+      // No significant changes detected
+      console.log(
+        `No significant changes detected for ${source}, skipping Redis update`
+      );
+      return false;
+    } catch (error) {
+      console.error(`Error checking if data changed for ${source}:`, error);
+      // If error occurred, assume data changed to be safe
+      return true;
+    }
+  }
+
   // Stores pools in chunks to avoid Redis size limits
   private async storePoolsInChunks(
     source: string,
     pools: Pool[]
   ): Promise<void> {
     try {
-      // Create chunks of pools
+      // First check if data has actually changed
+      const hasChanged = await this.hasDataChanged(source, pools);
+
+      if (!hasChanged) {
+        // Data hasn't changed, just update in-memory cache and return
+        this.redisCacheData.set(source, pools);
+        return;
+      }
+
+      // Continue with existing storage logic...
       const chunks: Pool[][] = [];
       for (let i = 0; i < pools.length; i += this.CHUNK_SIZE) {
         chunks.push(pools.slice(i, i + this.CHUNK_SIZE));
@@ -175,32 +319,41 @@ class PoolTracker extends EventEmitter {
         }
       }
 
-      // Get metadata about chunks
+      // Retrieve chunks directly from Redis without any change detection
       const metadataKey = `pools:meta:${source}`;
-      const metadataJson = await this.redis.get<string>(metadataKey);
+      const metadataJson = await this.redis.get(metadataKey);
 
       if (!metadataJson) {
-        console.log(`No chunk metadata found for ${source}`);
         return [];
       }
 
-      const metadata = JSON.parse(metadataJson);
+      // Parse metadata
+      const metadata =
+        typeof metadataJson === "string"
+          ? JSON.parse(metadataJson)
+          : metadataJson;
+
+      if (!metadata || !metadata.chunks) {
+        return [];
+      }
+
       const numChunks = metadata.chunks;
 
       // Retrieve all chunks in parallel
-      const chunkPromises: Promise<string | null>[] = [];
+      const chunkPromises = [];
       for (let i = 0; i < numChunks; i++) {
         const chunkKey = `${this.CHUNK_KEY_PREFIX}${source}:${i}`;
-        chunkPromises.push(this.redis.get<string>(chunkKey));
+        chunkPromises.push(this.redis.get(chunkKey));
       }
 
       const chunkResults = await Promise.all(chunkPromises);
 
-      // Combine all chunks into a single array
+      // Combine chunks
       let allPools: Pool[] = [];
-      for (const chunkJson of chunkResults) {
-        if (chunkJson) {
-          const chunk = JSON.parse(chunkJson);
+      for (const chunkData of chunkResults) {
+        if (chunkData) {
+          const chunk =
+            typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
           allPools = allPools.concat(chunk);
         }
       }
@@ -208,12 +361,9 @@ class PoolTracker extends EventEmitter {
       // Update memory cache
       this.redisCacheData.set(source, allPools);
 
-      console.log(
-        `Retrieved ${allPools.length} pools from ${numChunks} chunks for ${source}`
-      );
       return allPools;
     } catch (error) {
-      console.error(`Error getting chunked pools for ${source}:`, error);
+      console.error(`Error getting pools from chunks for ${source}:`, error);
       return [];
     }
   }
@@ -634,18 +784,23 @@ class PoolTracker extends EventEmitter {
     const stonfiClient = new StonApiClient();
 
     this.isTracking = true;
+    let consecutiveErrorCount = 0;
 
     // Define fast update function for real-time data
     const performFastUpdate = async () => {
       try {
         // Check if we recently updated (avoid multiple simultaneous updates)
-        const lastUpdateStr = await this.redis.get<string>(
-          "fastUpdateTimestamp"
-        );
+        const lastUpdateData = await this.redis.get("fastUpdateTimestamp");
         const now = Date.now();
 
-        if (lastUpdateStr) {
-          const lastUpdate = parseInt(lastUpdateStr);
+        if (lastUpdateData) {
+          const lastUpdate =
+            typeof lastUpdateData === "string"
+              ? parseInt(lastUpdateData)
+              : typeof lastUpdateData === "number"
+              ? lastUpdateData
+              : 0;
+
           // Only update if 3 seconds have passed
           if (now - lastUpdate < this.FAST_UPDATE_INTERVAL) {
             return;
@@ -654,7 +809,6 @@ class PoolTracker extends EventEmitter {
 
         // Mark update in progress
         await this.redis.set("fastUpdateTimestamp", now, { ex: 10 });
-
         if (!this.db) {
           try {
             // Limit connection time to prevent hanging
@@ -678,7 +832,7 @@ class PoolTracker extends EventEmitter {
         const dedustPromise = Promise.race([
           dedustSDK.getPools().catch((err) => {
             console.error("Error fetching DeDust pools for fast update:", err);
-            return [];
+            return [] as DeDustPool[];
           }),
           new Promise((resolve) =>
             setTimeout(() => {
@@ -691,7 +845,7 @@ class PoolTracker extends EventEmitter {
         const stonfiPromise = Promise.race([
           stonfiClient.getPools().catch((err) => {
             console.error("Error fetching StonFi pools for fast update:", err);
-            return [];
+            return [] as StonFiPool[];
           }),
           new Promise((resolve) =>
             setTimeout(() => {
@@ -706,11 +860,126 @@ class PoolTracker extends EventEmitter {
           stonfiPromise,
         ]);
 
-        // Rest of your performFastUpdate implementation...
-        // Process and store pools
-        // ...
+        // Process DeDust pools with basic data needed for fast updates
+        const taggedDedustPools = (dedustPools as DeDustPool[]).map((pool) => ({
+          ...pool,
+          source: "dedust",
+          lastUpdateTimestamp: now,
+        }));
+
+        // Process StonFi pools with basic data needed for fast updates
+        const stonfiPools: Pool[] = [];
+        if (stonfiResponse && Array.isArray(stonfiResponse)) {
+          stonfiPools.push(
+            ...(stonfiResponse
+              .filter((pool) => !pool.deprecated)
+              .map((pool) => ({
+                address: pool.address,
+                reserves: [pool.reserve0, pool.reserve1],
+                source: "stonfi",
+                lastUpdateTimestamp: now,
+              })) as unknown as Pool[])
+          );
+        }
+
+        // Update Redis for each source
+        const allApiPools: Record<string, Pool[]> = {
+          dedust: taggedDedustPools as unknown as Pool[],
+          stonfi: stonfiPools,
+        };
+
+        // Update Redis for each source
+        for (const [source, sourcePools] of Object.entries(allApiPools)) {
+          if (sourcePools && sourcePools.length > 0) {
+            try {
+              // Get existing Redis pools for this source
+              const currentPools = await this.getPoolsFromChunks(source);
+
+              // Create map for fast lookup of existing pools
+              const poolMap = new Map<string, Pool>();
+              for (const pool of currentPools) {
+                poolMap.set(pool.address, pool);
+              }
+
+              let updatedCount = 0;
+              let addedCount = 0;
+
+              // Update existing or add new pools
+              for (const pool of sourcePools) {
+                // Get existing pool first
+                const existingPool = poolMap.get(pool.address);
+
+                if (existingPool) {
+                  // Merge the update with existing data to preserve metadata
+                  poolMap.set(pool.address, {
+                    ...existingPool, // Keep existing fields
+                    ...pool, // Apply updates from API
+                    // Ensure critical fields are preserved from existing data if not in API update
+                    assets: pool.assets || existingPool.assets,
+                    reserves: pool.reserves || existingPool.reserves,
+                    stats: pool.stats || existingPool.stats,
+                    lastUpdateTimestamp: now,
+                  });
+                  updatedCount++;
+                } else {
+                  // For new pools, add them directly
+                  poolMap.set(pool.address, {
+                    ...pool,
+                    lastUpdateTimestamp: now,
+                  });
+                  addedCount++;
+                }
+              }
+
+              // Convert back to array and store in Redis using chunks
+              const updatedPools = Array.from(poolMap.values());
+              await this.storePoolsInChunks(source, updatedPools);
+
+              console.log(
+                `Updated Redis cache for ${source}: ${updatedCount} updated, ${addedCount} added, total: ${updatedPools.length}`
+              );
+
+              // Emit events for updates
+              sourcePools.forEach((pool) =>
+                this.emit("poolStateUpdated", pool)
+              );
+            } catch (error) {
+              console.error(`Error updating ${source} pools in Redis:`, error);
+            }
+          } else {
+            console.warn(
+              `No ${source} pools received from API in this update cycle`
+            );
+          }
+        }
+
+        // Then update the database in the background (don't wait for it)
+        const allPools = [...taggedDedustPools, ...stonfiPools];
+        if (allPools.length > 0) {
+          this.updatePoolsDatabase(allPools).catch((error) => {
+            console.error("Background database update failed:", error);
+          });
+        }
+
+        // Reset consecutive error count on successful update
+        consecutiveErrorCount = 0;
       } catch (error) {
         console.error("Fast update error:", error);
+        consecutiveErrorCount++;
+
+        // Reconnect logic for consistent errors
+        if (consecutiveErrorCount >= 20) {
+          console.log(
+            "Too many consecutive errors, attempting to reconnect to MongoDB..."
+          );
+          try {
+            await this.disconnect();
+            await this.connect();
+            consecutiveErrorCount = 0;
+          } catch (reconnectError) {
+            console.error("Failed to reconnect:", reconnectError);
+          }
+        }
       }
     };
 
@@ -718,23 +987,137 @@ class PoolTracker extends EventEmitter {
     const performFullUpdate = async () => {
       try {
         // Check if we recently did a full update (avoid multiple simultaneous updates)
-        const lastFullUpdateStr = await this.redis.get<string>(
-          "fullUpdateTimestamp"
-        );
+        const lastFullUpdateData = await this.redis.get("fullUpdateTimestamp");
         const now = Date.now();
 
-        if (lastFullUpdateStr) {
-          const lastUpdate = parseInt(lastFullUpdateStr);
+        if (lastFullUpdateData) {
+          const lastUpdate =
+            typeof lastFullUpdateData === "string"
+              ? parseInt(lastFullUpdateData)
+              : typeof lastFullUpdateData === "number"
+              ? lastFullUpdateData
+              : 0;
+
           // Only update if 60 seconds have passed
           if (now - lastUpdate < this.FULL_UPDATE_INTERVAL) {
             return;
           }
         }
 
-        // Rest of your performFullUpdate implementation...
-        // ...
+        // Mark update in progress with timeout
+        await this.redis.set("fullUpdateTimestamp", now, { ex: 120 });
+        // Make sure we have a valid database connection
+        if (!this.db) {
+          try {
+            // Limit connection time to prevent hanging
+            await Promise.race([
+              this.connect(),
+              new Promise((_, reject) =>
+                setTimeout(
+                  () => reject(new Error("DB connection timeout")),
+                  5000
+                )
+              ),
+            ]);
+          } catch (connError) {
+            console.warn(
+              "DB connection timed out during full update, proceeding without DB"
+            );
+          }
+        }
+
+        // Create promises for both API requests with timeouts
+        const dedustPromise = Promise.race([
+          dedustSDK.getPools().catch((err) => {
+            console.error("Error fetching DeDust pools for full update:", err);
+            return [] as DeDustPool[]; // Return empty array on error
+          }),
+          new Promise((resolve) =>
+            setTimeout(() => {
+              console.warn(
+                "DeDust API timeout during full update, returning empty array"
+              );
+              resolve([]);
+            }, 8000)
+          ),
+        ]);
+
+        const stonfiPromise = Promise.race([
+          stonfiClient.getPools().catch((err) => {
+            console.error("Error fetching StonFi pools for full update:", err);
+            return [] as StonFiPool[]; // Return empty array on error
+          }),
+          new Promise((resolve) =>
+            setTimeout(() => {
+              console.warn(
+                "StonFi API timeout during full update, returning empty array"
+              );
+              resolve([]);
+            }, 8000)
+          ),
+        ]);
+
+        // Wait for both API calls in parallel
+        const [dedustPools, stonfiResponse] = await Promise.all([
+          dedustPromise,
+          stonfiPromise,
+        ]);
+
+        // Process DeDust pools with complete data
+        const taggedDedustPools = (dedustPools as DeDustPool[]).map((pool) => ({
+          ...pool,
+          source: "dedust",
+          lastUpdateTimestamp: now,
+        }));
+
+        // Process StonFi pools with complete data and error handling
+        const stonfiPools: Pool[] = [];
+        if (stonfiResponse && Array.isArray(stonfiResponse)) {
+          // Process pools in parallel batches for faster completion
+          const BATCH_SIZE = 20;
+          const numBatches = Math.ceil(stonfiResponse.length / BATCH_SIZE);
+
+          for (let i = 0; i < numBatches; i++) {
+            const batch = stonfiResponse.slice(
+              i * BATCH_SIZE,
+              (i + 1) * BATCH_SIZE
+            );
+
+            const batchResults = await Promise.all(
+              batch.map(async (pool) => {
+                if (pool.deprecated) return null;
+                try {
+                  return await this.convertStonFiPool(pool, stonfiClient);
+                } catch (err) {
+                  console.error(
+                    `Error converting StonFi pool ${pool.address}:`,
+                    err
+                  );
+                  return null;
+                }
+              })
+            );
+
+            stonfiPools.push(...(batchResults.filter(Boolean) as Pool[]));
+          }
+        }
+
+        // Combine pools from both sources
+        const allPools = [...taggedDedustPools, ...stonfiPools];
+        console.log(`Total pools for full update: ${allPools.length}`);
+
+        if (allPools.length > 0) {
+          // Update all pools with complete data
+          await this.updateBulkPoolStates(allPools);
+          consecutiveErrorCount = 0;
+        } else {
+          console.warn("No pools found in this full update cycle");
+        }
+
+        console.log("Full update completed successfully");
       } catch (error) {
         console.error("Full update error:", error);
+        consecutiveErrorCount++;
       }
     };
 
@@ -752,6 +1135,108 @@ class PoolTracker extends EventEmitter {
     // We're just initializing the function references
 
     console.log("Pool tracking initialized successfully");
+  }
+
+  // Modified method to accept skipUpdate parameter
+  async triggerUpdateIfNeeded(skipUpdate: boolean = false): Promise<void> {
+    // If skipUpdate is true or tracking is disabled, return immediately
+    if (skipUpdate || !this.isTracking) {
+      return;
+    }
+
+    try {
+      // Check if an update is already in progress
+      const updateInProgress = await this.redis.get(
+        this.UPDATE_IN_PROGRESS_KEY
+      );
+
+      if (updateInProgress) {
+        // Check when the update started - handle both string and numeric values
+        const updateStartTime =
+          typeof updateInProgress === "string"
+            ? parseInt(updateInProgress)
+            : typeof updateInProgress === "number"
+            ? updateInProgress
+            : Date.now();
+
+        const now = Date.now();
+
+        // If update has been running for less than 10 seconds, skip
+        if (now - updateStartTime < 10000) {
+          return;
+        } else {
+          // Stale lock - the previous update might have failed
+          console.log("Clearing stale update lock");
+        }
+      }
+
+      // Check when we last did a fast update
+      const lastUpdateData = await this.redis.get("fastUpdateTimestamp");
+      const now = Date.now();
+
+      let shouldUpdate = false;
+
+      if (!lastUpdateData) {
+        shouldUpdate = true;
+      } else {
+        const lastUpdate =
+          typeof lastUpdateData === "string"
+            ? parseInt(lastUpdateData)
+            : typeof lastUpdateData === "number"
+            ? lastUpdateData
+            : 0;
+
+        // Only update if it's been more than FAST_UPDATE_INTERVAL since last update
+        if (now - lastUpdate >= this.FAST_UPDATE_INTERVAL) {
+          shouldUpdate = true;
+        }
+      }
+
+      if (shouldUpdate) {
+        // Set an update in progress lock with timeout
+        await this.redis.set(this.UPDATE_IN_PROGRESS_KEY, now.toString(), {
+          ex: 30,
+        });
+
+        try {
+          // Trigger a fast update
+          await this.performFastUpdate();
+        } finally {
+          // Always clear the lock when done
+          await this.redis.del(this.UPDATE_IN_PROGRESS_KEY);
+        }
+      }
+
+      // Check when we last did a full update
+      const lastFullUpdateData = await this.redis.get("fullUpdateTimestamp");
+
+      let shouldFullUpdate = false;
+
+      if (!lastFullUpdateData) {
+        shouldFullUpdate = true;
+      } else {
+        const lastFullUpdate =
+          typeof lastFullUpdateData === "string"
+            ? parseInt(lastFullUpdateData)
+            : typeof lastFullUpdateData === "number"
+            ? lastFullUpdateData
+            : 0;
+
+        // Only do full update if it's been more than FULL_UPDATE_INTERVAL
+        if (now - lastFullUpdate >= this.FULL_UPDATE_INTERVAL) {
+          shouldFullUpdate = true;
+        }
+      }
+
+      if (shouldFullUpdate) {
+        // Don't wait for full update, just trigger it in background
+        this.performFullUpdate().catch((err) =>
+          console.error("Error in background full update:", err)
+        );
+      }
+    } catch (error) {
+      console.error("Error checking update timestamps:", error);
+    }
   }
 
   async stopTracking(): Promise<void> {
@@ -806,81 +1291,90 @@ class PoolTracker extends EventEmitter {
     }
   }
 
-  async getPoolsBySource(source: string): Promise<Pool[]> {
-    // Check if it's time to update
-    await this.triggerUpdateIfNeeded();
+  // Modified method to accept skipUpdate parameter
+  async getLatestPools(
+    source: string,
+    skipUpdate: boolean = false
+  ): Promise<Pool[]> {
+    // Check if it's time to update first, passing the skipUpdate parameter
+    await this.triggerUpdateIfNeeded(skipUpdate);
 
-    // Initialize database connection if needed
-    if (!this.db) {
-      await this.connect();
-    }
-
-    // Get pools from chunks
     try {
+      // Get pools from chunks
       const pools = await this.getPoolsFromChunks(source);
       if (pools.length > 0) {
-        return pools;
+        // Verify pools have the minimum required data structure
+        const validPools = pools.filter(
+          (p) =>
+            p &&
+            p.address &&
+            ((p.reserves && p.reserves.length > 0) ||
+              (p.assets && p.assets.length > 0))
+        );
+
+        if (validPools.length > 0) {
+          return pools;
+        }
       }
     } catch (error) {
-      console.error(`Error getting pools from Redis for ${source}:`, error);
+      console.error(
+        `Error getting latest pools from Redis for ${source}:`,
+        error
+      );
     }
 
-    // Fall back to MongoDB if Redis fails or has no data
-    const results = await this.db!.find({ source }).toArray();
-    const pools = results.map((doc) => doc as unknown as Pool);
-
-    // Store in Redis for future use
-    if (pools.length > 0) {
-      try {
-        await this.storePoolsInChunks(source, pools);
-      } catch (redisError) {
-        console.error(
-          `Error storing pools in Redis for ${source}:`,
-          redisError
-        );
+    // Fall back to database if Redis fails or has no data
+    try {
+      if (!this.db) {
+        await this.connect();
       }
-    }
 
-    return pools;
+      const results = await this.db.find({ source }).toArray();
+      const pools = results.map((doc) => doc as unknown as Pool);
+
+      // Store in Redis for future use
+      if (pools.length > 0) {
+        try {
+          await this.storePoolsInChunks(source, pools);
+        } catch (redisError) {
+          console.error(
+            `Error storing pools in Redis for ${source}:`,
+            redisError
+          );
+        }
+      }
+
+      return pools;
+    } catch (error) {
+      console.error(`Error fetching pools from database for ${source}:`, error);
+      return [];
+    }
   }
 
-  // Helper method to trigger updates if needed
-  async triggerUpdateIfNeeded(): Promise<void> {
-    if (!this.isTracking) {
-      return;
-    }
-
+  async getPoolsBySource(source: string): Promise<Pool[]> {
+    // Simply retrieve from chunks/Redis
     try {
-      // Check when we last did a fast update
-      const lastUpdateStr = await this.redis.get<string>("fastUpdateTimestamp");
-      const now = Date.now();
+      const pools = await this.getPoolsFromChunks(source);
 
-      if (
-        !lastUpdateStr ||
-        now - parseInt(lastUpdateStr) >= this.FAST_UPDATE_INTERVAL
-      ) {
-        // Trigger a fast update if it's been more than 3 seconds
-        this.performFastUpdate().catch((err) =>
-          console.error("Error in background fast update:", err)
-        );
+      // If no pools in Redis chunks, fall back to database
+      if (pools.length === 0) {
+        if (!this.db) {
+          await this.connect();
+        }
+        const results = await this.db!.find({ source }).toArray();
+        return results.map((doc) => doc as unknown as Pool);
       }
 
-      // Check when we last did a full update
-      const lastFullUpdateStr = await this.redis.get<string>(
-        "fullUpdateTimestamp"
-      );
-
-      if (
-        !lastFullUpdateStr ||
-        now - parseInt(lastFullUpdateStr) >= this.FULL_UPDATE_INTERVAL
-      ) {
-        // Trigger a full update if it's been more than 60 seconds
-        this.performFullUpdate().catch((err) =>
-          console.error("Error in background full update:", err)
-        );
-      }
+      return pools;
     } catch (error) {
-      console.error("Error checking update timestamps:", error);
+      console.error(`Error getting pools for ${source}:`, error);
+
+      // Fallback if everything fails
+      if (!this.db) {
+        await this.connect();
+      }
+      const results = await this.db!.find({ source }).toArray();
+      return results.map((doc) => doc as unknown as Pool);
     }
   }
 
@@ -971,62 +1465,6 @@ class PoolTracker extends EventEmitter {
         this.mongoClient = null;
         this.db = null;
       }
-    }
-  }
-
-  async getLatestPools(source: string): Promise<Pool[]> {
-    // Check if it's time to update first
-    await this.triggerUpdateIfNeeded();
-
-    try {
-      // Get pools from chunks
-      const pools = await this.getPoolsFromChunks(source);
-      if (pools.length > 0) {
-        // Verify pools have the minimum required data structure
-        const validPools = pools.filter(
-          (p) =>
-            p &&
-            p.address &&
-            ((p.reserves && p.reserves.length > 0) ||
-              (p.assets && p.assets.length > 0))
-        );
-
-        if (validPools.length > 0) {
-          return pools;
-        }
-      }
-    } catch (error) {
-      console.error(
-        `Error getting latest pools from Redis for ${source}:`,
-        error
-      );
-    }
-
-    // Fall back to database if Redis fails or has no data
-    try {
-      if (!this.db) {
-        await this.connect();
-      }
-
-      const results = await this.db.find({ source }).toArray();
-      const pools = results.map((doc) => doc as unknown as Pool);
-
-      // Store in Redis for future use
-      if (pools.length > 0) {
-        try {
-          await this.storePoolsInChunks(source, pools);
-        } catch (redisError) {
-          console.error(
-            `Error storing pools in Redis for ${source}:`,
-            redisError
-          );
-        }
-      }
-
-      return pools;
-    } catch (error) {
-      console.error(`Error fetching pools from database for ${source}:`, error);
-      return [];
     }
   }
 
@@ -1360,12 +1798,16 @@ class PoolService {
     return await this.tracker.getAllPools();
   }
 
-  async getPoolsBySource(source: string): Promise<Pool[]> {
+  // Modified method to accept and pass skipUpdate parameter
+  async getPoolsBySource(
+    source: string,
+    skipUpdate: boolean = false
+  ): Promise<Pool[]> {
     // Ensure initialization before getting pools
     if (!this.initialized) {
       await this.initialize();
     }
-    return await this.tracker.getLatestPools(source);
+    return await this.tracker.getLatestPools(source, skipUpdate);
   }
 
   public getTracker(): PoolTracker {

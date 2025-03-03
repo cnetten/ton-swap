@@ -26,11 +26,15 @@ export async function GET(req: Request) {
     }
 
     const tracker = poolService.getTracker();
+    const redis = poolService.getRedis();
 
     // Reset flags if they've been stuck or forced
     if (forceUpdate) {
-      tracker.fastUpdateInProgress = false;
-      tracker.fullUpdateInProgress = false;
+      // Reset Redis flags instead of in-memory flags
+      await redis.del(`update:fast:inProgress`);
+      await redis.del(`update:fast:startTime`);
+      await redis.del(`update:full:inProgress`);
+      await redis.del(`update:full:startTime`);
       console.log("Update flags reset due to force parameter");
     }
 
@@ -43,8 +47,17 @@ export async function GET(req: Request) {
         // Setup timeout
         const timeout = setTimeout(() => {
           console.error(`Update timed out after ${updateTimeoutMs / 1000}s`);
-          tracker.fastUpdateInProgress = false;
-          tracker.fullUpdateInProgress = false;
+
+          // Reset Redis flags on timeout
+          (async () => {
+            await redis.del(
+              `update:${isFullUpdate ? "full" : "fast"}:inProgress`
+            );
+            await redis.del(
+              `update:${isFullUpdate ? "full" : "fast"}:startTime`
+            );
+          })().catch((err) => console.error("Error resetting flags:", err));
+
           reject(new Error("Update timed out"));
         }, updateTimeoutMs);
 
@@ -68,7 +81,7 @@ export async function GET(req: Request) {
     await updateWithTimeout();
 
     // Clear path cache to ensure fresh calculations
-    tracker.clearPathCache();
+    await tracker.clearPathCache();
 
     // Return success response
     return NextResponse.json(
@@ -94,11 +107,17 @@ export async function GET(req: Request) {
 
     // Reset flags to prevent deadlock on errors
     const poolService = PoolService.getInstance();
-    const tracker = poolService.getTracker();
+    const redis = poolService.getRedis();
 
-    // Reset update flags to avoid deadlocks
-    tracker.fastUpdateInProgress = false;
-    tracker.fullUpdateInProgress = false;
+    // Reset Redis flags instead of in-memory flags
+    try {
+      await redis.del(`update:fast:inProgress`);
+      await redis.del(`update:fast:startTime`);
+      await redis.del(`update:full:inProgress`);
+      await redis.del(`update:full:startTime`);
+    } catch (redisError) {
+      console.error("Error resetting Redis flags:", redisError);
+    }
 
     return NextResponse.json(
       {

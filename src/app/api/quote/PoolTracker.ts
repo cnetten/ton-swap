@@ -97,10 +97,6 @@ class PoolTracker extends EventEmitter {
   public pathCacheExpiry = new Map<string, number>();
   private readonly PATH_CACHE_TTL = 30000; // 30 seconds TTL for path cache
 
-  // Update in progress flags
-  public fastUpdateInProgress = false;
-  public fullUpdateInProgress = false;
-
   // API clients for direct calls
   private dedustClient: DeDustClient;
   private stonfiClient: StonApiClient;
@@ -306,6 +302,64 @@ class PoolTracker extends EventEmitter {
       console.error(`Error checking if data changed for ${source}:`, error);
       // If error occurred, assume data changed to be safe
       return true;
+    }
+  }
+  private async isUpdateInProgress(type: string): Promise<boolean> {
+    try {
+      const flagKey = `update:${type}:inProgress`;
+      const flag = await this.redis.get(flagKey);
+
+      if (flag === "true") {
+        // Check if the flag is stale (older than 5 minutes)
+        const startTimeKey = `update:${type}:startTime`;
+        const startTimeStr = await this.redis.get(startTimeKey);
+        let startTime = 0;
+        if (startTimeStr !== null) {
+          if (typeof startTimeStr === "string") {
+            startTime = parseInt(startTimeStr);
+          } else if (typeof startTimeStr === "number") {
+            startTime = startTimeStr;
+          }
+        }
+        const now = Date.now();
+
+        // If the update has been running for more than 5 minutes, consider it stale
+        if (now - startTime > 300000) {
+          console.log(
+            `Force resetting stuck ${type} update flag after 5 minutes`
+          );
+          await this.redis.del(flagKey);
+          await this.redis.del(startTimeKey);
+          return false;
+        }
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error(`Error checking ${type} update status:`, error);
+      return false;
+    }
+  }
+
+  private async setUpdateInProgress(
+    type: string,
+    inProgress: boolean
+  ): Promise<void> {
+    try {
+      const flagKey = `update:${type}:inProgress`;
+      const startTimeKey = `update:${type}:startTime`;
+
+      if (inProgress) {
+        // Set flag with 10 minute expiry as a safeguard
+        await this.redis.set(flagKey, "true", { ex: 600 });
+        await this.redis.set(startTimeKey, Date.now().toString(), { ex: 600 });
+      } else {
+        // Clear the flags
+        await this.redis.del(flagKey);
+        await this.redis.del(startTimeKey);
+      }
+    } catch (error) {
+      console.error(`Error setting ${type} update status:`, error);
     }
   }
 
@@ -661,13 +715,13 @@ class PoolTracker extends EventEmitter {
     // This function should be placed inside the startTracking method
     const performFastUpdate = async () => {
       // CRITICAL: Skip if update already in progress
-      if (this.fastUpdateInProgress) {
+      if (await this.isUpdateInProgress("fast")) {
         console.log("Fast update already in progress, skipping");
         return;
       }
 
       try {
-        this.fastUpdateInProgress = true;
+        await this.setUpdateInProgress("fast", true);
 
         // Check if we recently updated (avoid multiple simultaneous updates)
         const lastUpdateData = await this.redis.get("fastUpdateTimestamp");
@@ -839,20 +893,20 @@ class PoolTracker extends EventEmitter {
         console.error("Fast update error:", error);
       } finally {
         // IMPORTANT: Reset update in progress flag
-        this.fastUpdateInProgress = false;
+        await this.setUpdateInProgress("fast", false);
       }
     };
 
     // Function for full updates (complete metadata refresh) with debounce logic
     const performFullUpdate = async () => {
       // Skip if update already in progress
-      if (this.fullUpdateInProgress) {
+      if (await this.isUpdateInProgress("full")) {
         console.log("Full update already in progress, skipping");
         return;
       }
 
       try {
-        this.fullUpdateInProgress = true;
+        await this.setUpdateInProgress("full", true);
 
         // Check if we recently did a full update (avoid multiple simultaneous updates)
         const lastFullUpdateData = await this.redis.get("fullUpdateTimestamp");
@@ -969,7 +1023,7 @@ class PoolTracker extends EventEmitter {
         console.error("Full update error:", error);
       } finally {
         // IMPORTANT: Reset update in progress flag
-        this.fullUpdateInProgress = false;
+        await this.setUpdateInProgress("full", false);
       }
     };
 
@@ -1041,8 +1095,10 @@ class PoolTracker extends EventEmitter {
         }
       }
 
-      if (shouldUpdate && !this.fastUpdateInProgress) {
-        // Add check for update in progress
+      // Check if fast update is in progress using Redis
+      const fastUpdateInProgress = await this.isUpdateInProgress("fast");
+
+      if (shouldUpdate && !fastUpdateInProgress) {
         // Set an update in progress lock with timeout
         await this.redis.set(this.UPDATE_IN_PROGRESS_KEY, now.toString(), {
           ex: 30,
@@ -1078,8 +1134,10 @@ class PoolTracker extends EventEmitter {
         }
       }
 
-      if (shouldFullUpdate && !this.fullUpdateInProgress) {
-        // Add check for update in progress
+      // Check if full update is in progress using Redis
+      const fullUpdateInProgress = await this.isUpdateInProgress("full");
+
+      if (shouldFullUpdate && !fullUpdateInProgress) {
         // Don't wait for full update, just trigger it in background
         this.performFullUpdate().catch((err) =>
           console.error("Error in background full update:", err)

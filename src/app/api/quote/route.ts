@@ -145,8 +145,16 @@ async function findBestPathsBySource(
     amountWithDecimals
   );
   if (cachedResult) {
-    console.log("Using cached path result");
-    return cachedResult;
+    // Check if pools have been updated since the path was cached
+    const lastPoolUpdate = await tracker.redis.get(`lastUpdate:dedust`);
+    const pathCacheTime = cachedResult.timestamp || 0;
+
+    if (lastPoolUpdate && pathCacheTime < lastPoolUpdate) {
+      console.log("Pools updated since path was cached, recalculating");
+    } else {
+      console.log("Using cached path result");
+      return cachedResult;
+    }
   }
 
   console.log("Fetching pools from all sources...");
@@ -252,12 +260,10 @@ async function findBestPathsBySource(
   const result = { bestDedustPath, bestStonfiPath, allFilteredPools };
 
   // Cache the result for future requests
-  poolService.cachePathResult(
-    fromAddress,
-    toAddress,
-    amountWithDecimals,
-    result
-  );
+  poolService.cachePathResult(fromAddress, toAddress, amountWithDecimals, {
+    ...result,
+    timestamp: Date.now(),
+  });
 
   return result;
 }

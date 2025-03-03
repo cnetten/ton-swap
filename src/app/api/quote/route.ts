@@ -3,7 +3,6 @@
 export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { findSwapPathsParallel } from "./parallel-finder";
-import { initializePoolService } from "../init";
 import { PoolService } from "./PoolTracker";
 
 // Initialize on first request
@@ -118,6 +117,13 @@ function buildPoolGraph(filteredPools: Pool[]) {
   return { poolGraph, poolsByPair };
 }
 
+// Initialize PoolService
+async function initializePoolService(): Promise<void> {
+  const poolService = PoolService.getInstance();
+  await poolService.initialize();
+  console.log("PoolService initialized");
+}
+
 // Process and find best paths for each exchange source separately
 async function findBestPathsBySource(
   fromAddress: string,
@@ -132,19 +138,30 @@ async function findBestPathsBySource(
   const poolService = PoolService.getInstance();
   const tracker = poolService.getTracker();
 
+  // Check cache first for this exact swap
+  const cachedResult = poolService.getPathFromCache(
+    fromAddress,
+    toAddress,
+    amountWithDecimals
+  );
+  if (cachedResult) {
+    console.log("Using cached path result");
+    return cachedResult;
+  }
+
   console.log("Fetching pools from all sources...");
 
-  // Get pools from different sources
+  // Get pools from different sources - use skipUpdate=true to avoid delays
   const [dedustPools, stonfiPools] = await Promise.all([
-    poolService.getPoolsBySource("dedust", true), // Pass true to skip updates
-    poolService.getPoolsBySource("stonfi", true), // Pass true to skip updates
+    poolService.getPoolsBySource("dedust", true),
+    poolService.getPoolsBySource("stonfi", true),
   ]);
 
   console.log(
     `Found ${dedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
   );
 
-  // Process pools by source
+  // Process pools by source - use a lower minimum liquidity for more options
   const minLiquidity = 100000;
 
   // Filter pools for each source
@@ -191,7 +208,7 @@ async function findBestPathsBySource(
     }
   }
 
-  // Find best path for StonFi pools
+  // Find best path for StonFi pools (only if enough pools are available)
   if (filteredStonfiPools.length > 0) {
     const { poolGraph: stonfiGraph, poolsByPair: stonfiPoolsByPair } =
       buildPoolGraph(filteredStonfiPools);
@@ -208,17 +225,17 @@ async function findBestPathsBySource(
         : toAddress;
 
     console.log("Finding swap paths for StonFi pools...");
-    // const stonfiPaths = await findSwapPathsParallel(
-    //   stonfiGraph,
-    //   stonfiPoolsByPair,
-    //   stonFiFromAdress,
-    //   stonFiToAddress,
-    //   amountWithDecimals,
-    //   4, // maxDepth
-    //   1, // maxPaths
-    //   "stonfi"
-    // );
-    const stonfiPaths = [];
+    const stonfiPaths = await findSwapPathsParallel(
+      stonfiGraph,
+      stonfiPoolsByPair,
+      stonFiFromAdress,
+      stonFiToAddress,
+      amountWithDecimals,
+      4, // maxDepth
+      1, // maxPaths
+      "stonfi"
+    );
+
     if (stonfiPaths.length > 0) {
       bestStonfiPath = { ...stonfiPaths[0], source: "stonfi" };
       console.log(
@@ -230,7 +247,17 @@ async function findBestPathsBySource(
   // Combine all filtered pools for reference
   const allFilteredPools = [...filteredDedustPools, ...filteredStonfiPools];
 
-  return { bestDedustPath, bestStonfiPath, allFilteredPools };
+  const result = { bestDedustPath, bestStonfiPath, allFilteredPools };
+
+  // Cache the result for future requests
+  poolService.cachePathResult(
+    fromAddress,
+    toAddress,
+    amountWithDecimals,
+    result
+  );
+
+  return result;
 }
 
 // Compare and select the best path overall
@@ -262,6 +289,8 @@ export async function POST(req: Request) {
     initialized = true;
   }
 
+  const startTime = performance.now();
+
   try {
     const { fromAddress, toAddress, amount, slippageTolerance } =
       await req.json();
@@ -285,10 +314,10 @@ export async function POST(req: Request) {
 
     const poolService = PoolService.getInstance();
 
-    // Pass skipUpdate=true to avoid triggering updates during quote requests
+    // Always pass skipUpdate=true to avoid triggering updates during quote requests
     const [dedustPools, stonfiPools] = await Promise.all([
-      poolService.getPoolsBySource("dedust", true), // Skip updates
-      poolService.getPoolsBySource("stonfi", true), // Skip updates
+      poolService.getPoolsBySource("dedust", true),
+      poolService.getPoolsBySource("stonfi", true),
     ]);
 
     // Combine all pools for decimals lookup
@@ -305,7 +334,7 @@ export async function POST(req: Request) {
     const slippageDecimal = (slippageTolerance || 0.5) / 100;
     console.log(`Using slippage tolerance: ${slippageDecimal * 100}%`);
 
-    // Find best paths for each exchange separately - this will now use skipUpdate=true internally
+    // Find best paths for each exchange separately - this will use skipUpdate=true internally
     const { bestDedustPath, bestStonfiPath, allFilteredPools } =
       await findBestPathsBySource(
         actualFromAddress,
@@ -361,6 +390,10 @@ export async function POST(req: Request) {
       source: bestPath.source, // Include the source in the result
     };
 
+    const endTime = performance.now();
+    const requestTime = Math.round(endTime - startTime);
+    console.log(`Request processed in ${requestTime}ms`);
+
     return NextResponse.json({
       swapPaths: [formattedPath],
       exchangeComparison: {
@@ -383,16 +416,20 @@ export async function POST(req: Request) {
             }
           : null,
         bestExchange: bestPath.source,
+        requestTimeMs: requestTime,
       },
     });
   } catch (error: any) {
     console.error("Error in POST handler:", error);
+    const endTime = performance.now();
+
     return NextResponse.json(
       {
         error:
           error?.message ||
           "An unexpected error occurred while requesting the swap quote",
         details: error?.stack,
+        requestTimeMs: Math.round(endTime - startTime),
       },
       {
         status: error?.status || 500,

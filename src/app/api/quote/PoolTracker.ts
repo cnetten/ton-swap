@@ -197,8 +197,13 @@ class PoolTracker extends EventEmitter {
         return false;
       }
 
-      // CHANGE: Only check pool count for basic validation, not detailed reserve checks
-      // This will allow more frequent updates to ensure reserves are current
+      // OPTIMIZATION: Force update every 30 seconds regardless of detected changes
+      if (now - lastUpdateValue > 30000) {
+        console.log(`Forcing update for ${source} after 30 seconds`);
+        return true;
+      }
+
+      // Check if pool count has changed
       const metadataKey = `pools:meta:${source}`;
       const metadataData = await this.redis.get(metadataKey);
 
@@ -221,78 +226,74 @@ class PoolTracker extends EventEmitter {
         return true;
       }
 
-      // CHANGE: Force update every 30 seconds regardless of detected changes
-      // This ensures reserves get updated even if our change detection missed something
-      if (now - lastUpdateValue > 30000) {
-        console.log(`Forcing update for ${source} after 30 seconds`);
-        return true;
+      // OPTIMIZATION: Fetch all chunks at once to minimize Redis round-trips
+      const chunkPromises = [];
+      for (let i = 0; i < metadata.chunks; i++) {
+        const chunkKey = `${this.CHUNK_KEY_PREFIX}${source}:${i}`;
+        chunkPromises.push(this.redis.get(chunkKey));
       }
 
-      // CHANGE: Instead of random sampling, check pools with highest volume/activity
-      // This is more likely to catch meaningful reserve changes
-      const topPools = [...newPools]
-        .sort((a, b) => {
-          // Sort by total volume or another metric indicating activity
-          const aVolume =
-            a.stats?.volume?.reduce(
-              (sum, v) => sum + parseFloat(v || "0"),
-              0
-            ) || 0;
-          const bVolume =
-            b.stats?.volume?.reduce(
-              (sum, v) => sum + parseFloat(v || "0"),
-              0
-            ) || 0;
-          return bVolume - aVolume; // Descending order
-        })
-        .slice(0, 20); // Check top 20 pools instead of random 10
+      const chunkResults = await Promise.all(chunkPromises);
 
-      // Check these top pools against Redis
-      for (const pool of topPools) {
-        // Which chunk would this pool be in?
-        const chunkIndex = Math.floor(
-          newPools.findIndex((p) => p.address === pool.address) /
-            this.CHUNK_SIZE
-        );
+      // Build a map of all existing pools for faster lookups
+      const existingPoolMap = new Map<string, Pool>();
+      for (const chunkData of chunkResults) {
+        if (chunkData) {
+          const chunk =
+            typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
 
-        if (chunkIndex < 0 || chunkIndex >= metadata.chunks) {
-          // Can't find the chunk, data has changed
-          return true;
-        }
-
-        const chunkKey = `${this.CHUNK_KEY_PREFIX}${source}:${chunkIndex}`;
-        const chunkData = await this.redis.get(chunkKey);
-
-        if (!chunkData) {
-          // Chunk missing, data has changed
-          return true;
-        }
-
-        // Parse chunk if it's a string
-        const chunkPools =
-          typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
-
-        const existingPool = chunkPools.find(
-          (p: Pool) => p.address === pool.address
-        );
-
-        if (!existingPool) {
-          // Pool not found, data has changed
-          return true;
-        }
-
-        // Check if reserves have changed - the most common change
-        if (pool.reserves && existingPool.reserves) {
-          if (pool.reserves.join(",") !== existingPool.reserves.join(",")) {
-            // Reserves changed, data has changed
-            return true;
+          for (const pool of chunk) {
+            existingPoolMap.set(pool.address, pool);
           }
         }
       }
 
-      // No significant changes detected in top pools
+      // Now check ALL pools for changes
+      let changeCount = 0;
+      let poolsChecked = 0;
+
+      for (const newPool of newPools) {
+        poolsChecked++;
+        const existingPool = existingPoolMap.get(newPool.address);
+
+        // If pool doesn't exist in Redis yet, it's a change
+        if (!existingPool) {
+          console.log(`New pool found: ${newPool.address}`);
+          return true;
+        }
+
+        // Check if reserves have changed
+        if (newPool.reserves && existingPool.reserves) {
+          if (newPool.reserves.join(",") !== existingPool.reserves.join(",")) {
+            changeCount++;
+
+            // Log a sample of changes (avoid excessive logging)
+            if (changeCount <= 5) {
+              console.log(
+                `Reserves changed for pool ${newPool.address}: [${existingPool.reserves}] -> [${newPool.reserves}]`
+              );
+            }
+
+            // Return early after finding a certain number of changes
+            if (changeCount >= 10) {
+              console.log(
+                `Found ${changeCount} reserve changes, updating data`
+              );
+              return true;
+            }
+          }
+        }
+      }
+
+      if (changeCount > 0) {
+        console.log(
+          `Found ${changeCount} reserve changes out of ${poolsChecked} pools checked`
+        );
+        return true;
+      }
+
       console.log(
-        `No significant changes detected for ${source}, skipping Redis update`
+        `No changes detected after checking all ${poolsChecked} pools`
       );
       return false;
     } catch (error) {

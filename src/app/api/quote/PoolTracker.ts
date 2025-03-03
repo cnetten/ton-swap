@@ -144,22 +144,19 @@ class PoolTracker extends EventEmitter {
     this.pathCacheExpiry.set(cacheKey, Date.now() + this.PATH_CACHE_TTL);
   }
 
-  public getPathFromCache(
+  public async getPathFromCache(
     fromAddress: string,
     toAddress: string,
     amount: string
-  ): any | null {
-    const cacheKey = `${fromAddress}-${toAddress}-${amount}`;
-    const expiry = this.pathCacheExpiry.get(cacheKey) || 0;
+  ): Promise<any | null> {
+    const cacheKey = `path:${fromAddress}-${toAddress}-${amount}`;
+    const cachedResult = await this.redis.get(cacheKey);
 
-    // Return null if cache expired
-    if (expiry < Date.now()) {
-      this.pathCache.delete(cacheKey);
-      this.pathCacheExpiry.delete(cacheKey);
-      return null;
-    }
+    if (!cachedResult) return null;
 
-    return this.pathCache.get(cacheKey) || null;
+    return typeof cachedResult === "string"
+      ? JSON.parse(cachedResult)
+      : cachedResult;
   }
 
   // Add a method to check if data has actually changed

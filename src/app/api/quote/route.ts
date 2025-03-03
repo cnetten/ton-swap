@@ -365,10 +365,8 @@ export async function POST(req: Request) {
 
     if (forceRefresh) {
       console.log("Force refreshing pools before quote");
+      const tracker = poolService.getTracker();
       await tracker.performFastUpdate();
-    } else {
-      // Check if we need an update - pass false to potentially trigger an update
-      await tracker.triggerUpdateIfNeeded(false);
     }
     // Always pass skipUpdate=true to avoid triggering updates during quote requests
     const [dedustPools, stonfiPools] = await Promise.all([

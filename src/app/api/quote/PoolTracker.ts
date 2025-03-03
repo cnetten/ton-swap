@@ -168,27 +168,34 @@ class PoolTracker extends EventEmitter {
     newPools: Pool[]
   ): Promise<boolean> {
     try {
+      // Get the current timestamp
+      const now = Date.now();
+
       // First check the lastUpdate timestamp
       const lastUpdateKey = `lastUpdate:${source}`;
       const lastUpdateData = await this.redis.get(lastUpdateKey);
 
       let lastUpdateValue: number | null = null;
-
       if (typeof lastUpdateData === "string") {
         lastUpdateValue = parseInt(lastUpdateData);
       } else if (typeof lastUpdateData === "number") {
         lastUpdateValue = lastUpdateData;
       }
 
-      if (lastUpdateValue === null) {
-        // No previous update, data has changed
+      // Force update if no previous update or if it's been more than 15 seconds
+      if (lastUpdateValue === null || now - lastUpdateValue > 15000) {
+        console.log(
+          `Forcing update for ${source}: ${
+            lastUpdateValue
+              ? `last update was ${now - lastUpdateValue}ms ago`
+              : "no previous update"
+          }`
+        );
         return true;
       }
 
-      const now = Date.now();
-
-      // If last update was very recent (within 1 second), avoid duplicate updates
-      if (now - lastUpdateValue < 1000) {
+      // If last update was very recent (within 2 seconds), avoid duplicate updates
+      if (lastUpdateValue && now - lastUpdateValue < 2000) {
         console.log(
           `Skipping Redis update for ${source}, last update was ${
             now - lastUpdateValue
@@ -197,87 +204,79 @@ class PoolTracker extends EventEmitter {
         return false;
       }
 
-      // OPTIMIZATION: Force update every 30 seconds regardless of detected changes
-      if (now - lastUpdateValue > 30000) {
-        console.log(`Forcing update for ${source} after 30 seconds`);
-        return true;
-      }
+      // Check sample of pools for changes - more efficient for Vercel
+      const checkSampleSize = Math.min(10, newPools.length);
+      const sampleIndexes = Array.from({ length: checkSampleSize }, () =>
+        Math.floor(Math.random() * newPools.length)
+      );
 
-      // Check if pool count has changed
+      // Get metadata to access existing pools
       const metadataKey = `pools:meta:${source}`;
       const metadataData = await this.redis.get(metadataKey);
 
       if (!metadataData) {
-        // No metadata, data has changed
         return true;
       }
 
-      // Parse metadata if it's a string
+      // Parse metadata
       const metadata =
         typeof metadataData === "string"
           ? JSON.parse(metadataData)
           : metadataData;
 
-      // Check if pool count has changed
-      if (metadata.totalPools !== newPools.length) {
-        console.log(
-          `Pool count changed for ${source}: ${metadata.totalPools} -> ${newPools.length}`
-        );
+      if (!metadata || !metadata.chunks) {
         return true;
       }
 
-      // OPTIMIZATION: Fetch all chunks at once to minimize Redis round-trips
+      // Fetch a sample of chunks
       const chunkPromises = [];
-      for (let i = 0; i < metadata.chunks; i++) {
+      const chunkIndexes = [0]; // Always check first chunk
+      if (metadata.chunks > 1) {
+        // Add one random chunk if there are multiple
+        chunkIndexes.push(Math.floor(Math.random() * metadata.chunks));
+      }
+
+      for (const i of chunkIndexes) {
         const chunkKey = `${this.CHUNK_KEY_PREFIX}${source}:${i}`;
         chunkPromises.push(this.redis.get(chunkKey));
       }
 
       const chunkResults = await Promise.all(chunkPromises);
 
-      // Build a map of all existing pools for faster lookups
+      // Build a map of sample existing pools
       const existingPoolMap = new Map<string, Pool>();
       for (const chunkData of chunkResults) {
         if (chunkData) {
           const chunk =
             typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
-
           for (const pool of chunk) {
             existingPoolMap.set(pool.address, pool);
           }
         }
       }
 
-      // Now check ALL pools for changes
-      let changeCount = 0;
-      let poolsChecked = 0;
+      // Check sampled pools for changes
+      let changesFound = 0;
+      for (const idx of sampleIndexes) {
+        const newPool = newPools[idx];
+        if (!newPool || !newPool.address) continue;
 
-      for (const newPool of newPools) {
-        poolsChecked++;
         const existingPool = existingPoolMap.get(newPool.address);
-
-        // If pool doesn't exist in Redis yet, it's a change
         if (!existingPool) {
           console.log(`New pool found: ${newPool.address}`);
           return true;
         }
 
-        // Check if reserves have changed
         if (newPool.reserves && existingPool.reserves) {
           if (newPool.reserves.join(",") !== existingPool.reserves.join(",")) {
-            changeCount++;
+            changesFound++;
+            console.log(
+              `Reserve changed for pool ${newPool.address}: [${existingPool.reserves}] -> [${newPool.reserves}]`
+            );
 
-            // Log a sample of changes (avoid excessive logging)
-            if (changeCount <= 5) {
+            if (changesFound >= 3) {
               console.log(
-                `Reserves changed for pool ${newPool.address}: [${existingPool.reserves}] -> [${newPool.reserves}]`
-              );
-            }
-
-            // Return early after finding a certain number of changes
-            if (changeCount >= 10) {
-              console.log(
-                `Found ${changeCount} reserve changes, updating data`
+                `Found ${changesFound} changes in sample, updating data`
               );
               return true;
             }
@@ -285,17 +284,7 @@ class PoolTracker extends EventEmitter {
         }
       }
 
-      if (changeCount > 0) {
-        console.log(
-          `Found ${changeCount} reserve changes out of ${poolsChecked} pools checked`
-        );
-        return true;
-      }
-
-      console.log(
-        `No changes detected after checking all ${poolsChecked} pools`
-      );
-      return false;
+      return changesFound > 0;
     } catch (error) {
       console.error(`Error checking if data changed for ${source}:`, error);
       // If error occurred, assume data changed to be safe
@@ -683,10 +672,9 @@ class PoolTracker extends EventEmitter {
         }
 
         // Mark update in progress
-        await this.redis.set("fastUpdateTimestamp", now, { ex: 10 });
+        await this.redis.set("fastUpdateTimestamp", now, { ex: 60 });
 
         // Track if any reserves have changed to invalidate path cache
-        let anyReservesChanged = false;
 
         // OPTIMIZATION: Reduce API timeouts from 10s to 2s
         const dedustPromise = Promise.race([
@@ -778,7 +766,6 @@ class PoolTracker extends EventEmitter {
                       pool.reserves.join(",") !==
                       existingPool.reserves.join(",")
                     ) {
-                      anyReservesChanged = true;
                       console.log(
                         `Reserves changed for pool ${pool.address}: [${existingPool.reserves}] -> [${pool.reserves}]`
                       );
@@ -804,7 +791,6 @@ class PoolTracker extends EventEmitter {
                   });
                   addedCount++;
                   // New pools should also invalidate path cache
-                  anyReservesChanged = true;
                 }
               }
 
@@ -833,9 +819,9 @@ class PoolTracker extends EventEmitter {
           }
         }
 
-        // IMPORTANT NEW CODE: Clear path cache if any reserves changed
-        if (anyReservesChanged) {
-          console.log("Reserves changed, clearing path cache");
+        const forceRefreshSample = Math.floor(Math.random() * 5) === 0; // 20% chance
+        if (forceRefreshSample) {
+          console.log("Forced refresh of path cache based on random sample");
           this.clearPathCache();
         }
       } catch (error) {

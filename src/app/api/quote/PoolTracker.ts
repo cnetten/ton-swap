@@ -85,7 +85,7 @@ class PoolTracker extends EventEmitter {
   private readonly FAST_UPDATE_INTERVAL = 3000; // 3 seconds between fast updates
   private readonly FULL_UPDATE_INTERVAL = 60000; // 60 seconds between full updates
   private trackingIntervals: NodeJS.Timeout[] = [];
-  private redis: Redis;
+  public redis: Redis;
   private redisCacheData: Map<string, Pool[]> = new Map();
   private readonly CHUNK_SIZE = 200; // Number of pools per chunk, adjust as needed
   private readonly CHUNK_KEY_PREFIX = "pools:chunk:";
@@ -1573,10 +1573,18 @@ class PoolTracker extends EventEmitter {
     }
   }
 
-  public clearPathCache(): void {
-    console.log(`Clearing path cache with ${this.pathCache.size} entries`);
-    this.pathCache.clear();
-    this.pathCacheExpiry.clear();
+  public async clearPathCache(): Promise<void> {
+    // Get all path cache keys
+    try {
+      const pathKeys = await this.redis.keys("path:*");
+      console.log(`Clearing Redis path cache with ${pathKeys.length} entries`);
+
+      if (pathKeys.length > 0) {
+        await Promise.all(pathKeys.map((key) => this.redis.del(key)));
+      }
+    } catch (error) {
+      console.error("Error clearing Redis path cache:", error);
+    }
   }
 }
 
@@ -1590,6 +1598,10 @@ class PoolService {
     this.tracker = new PoolTracker(
       process.env.TON_ENDPOINT || "https://mainnet-v4.tonhubapi.com"
     );
+  }
+
+  public getRedis(): Redis {
+    return this.tracker.redis;
   }
 
   static getInstance(): PoolService {
@@ -1677,13 +1689,16 @@ class PoolService {
   }
 
   // Cache the path finding results
-  public cachePathResult(
+  public async cachePathResult(
     fromAddress: string,
     toAddress: string,
     amount: string,
     result: any
-  ): void {
-    this.tracker.cachePathResult(fromAddress, toAddress, amount, result);
+  ): Promise<void> {
+    const cacheKey = `path:${fromAddress}-${toAddress}-${amount}`;
+    await this.tracker.redis.set(cacheKey, JSON.stringify(result), {
+      ex: Math.floor(30000 / 1000),
+    });
   }
 
   // Retrieve path from cache

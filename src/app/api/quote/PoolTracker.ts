@@ -757,7 +757,7 @@ class PoolTracker extends EventEmitter {
 
         // Track if any reserves have changed to invalidate path cache
         let reservesChanged = false;
-        const changedPools = [];
+        let changedPools = [];
 
         // OPTIMIZATION: Reduce API timeouts from 10s to 2s
         const dedustPromise = fetchWithRetry(
@@ -828,7 +828,7 @@ class PoolTracker extends EventEmitter {
                 poolMap.set(pool.address, pool);
               }
 
-              const updatedCount = 0;
+              let updatedCount = 0;
               let addedCount = 0;
 
               // Update existing or add new pools
@@ -843,12 +843,25 @@ class PoolTracker extends EventEmitter {
                       pool.reserves.join(",") !==
                       existingPool.reserves.join(",")
                     ) {
+                      console.log(
+                        `Reserves changed for pool ${pool.address}: [${existingPool.reserves}] -> [${pool.reserves}]`
+                      );
                       changedPools.push(pool.address);
                       reservesChanged = true;
                     }
                   }
 
-                  // ...rest of update logic remains the same...
+                  // Merge the update with existing data to preserve metadata
+                  poolMap.set(pool.address, {
+                    ...existingPool, // Keep existing fields
+                    ...pool, // Apply updates from API
+                    // Ensure critical fields are preserved from existing data if not in API update
+                    assets: pool.assets || existingPool.assets,
+                    reserves: pool.reserves || existingPool.reserves,
+                    stats: pool.stats || existingPool.stats,
+                    lastUpdateTimestamp: now,
+                  });
+                  updatedCount++;
                 } else {
                   // For new pools, add them directly
                   poolMap.set(pool.address, {
@@ -887,16 +900,32 @@ class PoolTracker extends EventEmitter {
           }
         }
 
+        // IMPORTANT: Always clear path cache if reserves have changed
         if (reservesChanged) {
+          console.log(
+            `Reserves changed in pools [${changedPools.join(
+              ", "
+            )}], clearing path cache`
+          );
           await this.clearPathCache();
 
           // Update the lastUpdate timestamp for sources
           if (allApiPools.dedust && allApiPools.dedust.length > 0) {
             await this.redis.set("lastUpdate:dedust", now, { ex: 3600 });
+            console.log(
+              `Updated lastUpdate:dedust timestamp to ${new Date(
+                now
+              ).toISOString()}`
+            );
           }
 
           if (allApiPools.stonfi && allApiPools.stonfi.length > 0) {
             await this.redis.set("lastUpdate:stonfi", now, { ex: 3600 });
+            console.log(
+              `Updated lastUpdate:stonfi timestamp to ${new Date(
+                now
+              ).toISOString()}`
+            );
           }
         }
       } catch (error) {
@@ -906,7 +935,6 @@ class PoolTracker extends EventEmitter {
         await this.setUpdateInProgress("fast", false);
       }
     };
-
     // Function for full updates (complete metadata refresh) with debounce logic
     const performFullUpdate = async () => {
       // Skip if update already in progress

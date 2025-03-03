@@ -556,7 +556,6 @@ class PoolTracker extends EventEmitter {
                   pool.reserves.join(",") !== existingPool.reserves.join(",")
                 ) {
                   reservesChanged = true;
-                  console.log(`Reserves changed for pool ${pool.address}`);
                 }
               }
 

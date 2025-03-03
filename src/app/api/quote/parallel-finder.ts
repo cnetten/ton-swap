@@ -171,7 +171,7 @@ function calculateInitialSwapOutput(
     if (inputAmountWithFee <= BigInt(0)) return "0";
 
     const numerator = outputReserveBN * inputAmountWithFee;
-    const denominator = inputReserveBN + inputAmountWithFee;
+    const denominator = inputReserveBN + inputAmountWithFee + BigInt(1);
 
     if (denominator <= BigInt(0)) return "0";
 

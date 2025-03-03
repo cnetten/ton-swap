@@ -97,8 +97,8 @@ class PoolTracker extends EventEmitter {
   private readonly PATH_CACHE_TTL = 30000; // 30 seconds TTL for path cache
 
   // Update in progress flags
-  private fastUpdateInProgress = false;
-  private fullUpdateInProgress = false;
+  public fastUpdateInProgress = false;
+  public fullUpdateInProgress = false;
 
   // API clients for direct calls
   private dedustClient: DeDustClient;

@@ -139,7 +139,7 @@ async function findBestPathsBySource(
   const tracker = poolService.getTracker();
 
   // Check cache first for this exact swap
-  const cachedResult = poolService.getPathFromCache(
+  const cachedResult = await poolService.getPathFromCache(
     fromAddress,
     toAddress,
     amountWithDecimals

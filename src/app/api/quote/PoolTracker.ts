@@ -92,8 +92,8 @@ class PoolTracker extends EventEmitter {
   private readonly UPDATE_IN_PROGRESS_KEY = "updateInProgress";
 
   // Path cache for faster response - store calculation results
-  private pathCache = new Map<string, any>();
-  private pathCacheExpiry = new Map<string, number>();
+  public pathCache = new Map<string, any>();
+  public pathCacheExpiry = new Map<string, number>();
   private readonly PATH_CACHE_TTL = 30000; // 30 seconds TTL for path cache
 
   // Update in progress flags
@@ -149,14 +149,33 @@ class PoolTracker extends EventEmitter {
     toAddress: string,
     amount: string
   ): Promise<any | null> {
-    const cacheKey = `path:${fromAddress}-${toAddress}-${amount}`;
-    const cachedResult = await this.redis.get(cacheKey);
+    try {
+      // Try to get from Redis first
+      const cacheKey = `path:${fromAddress}-${toAddress}-${amount}`;
+      const cachedResult = await this.redis.get(cacheKey);
 
-    if (!cachedResult) return null;
+      if (cachedResult) {
+        return typeof cachedResult === "string"
+          ? JSON.parse(cachedResult)
+          : cachedResult;
+      }
 
-    return typeof cachedResult === "string"
-      ? JSON.parse(cachedResult)
-      : cachedResult;
+      // Fall back to in-memory cache if Redis failed or returned nothing
+      const inMemoryCacheKey = `${fromAddress}-${toAddress}-${amount}`;
+      const expiry = this.pathCacheExpiry.get(inMemoryCacheKey) || 0;
+
+      // Return null if cache expired
+      if (expiry < Date.now()) {
+        this.pathCache.delete(inMemoryCacheKey);
+        this.pathCacheExpiry.delete(inMemoryCacheKey);
+        return null;
+      }
+
+      return this.pathCache.get(inMemoryCacheKey) || null;
+    } catch (error) {
+      console.error("Error retrieving from path cache:", error);
+      return null;
+    }
   }
 
   // Add a method to check if data has actually changed
@@ -1692,10 +1711,47 @@ class PoolService {
     amount: string,
     result: any
   ): Promise<void> {
-    const cacheKey = `path:${fromAddress}-${toAddress}-${amount}`;
-    await this.tracker.redis.set(cacheKey, JSON.stringify(result), {
-      ex: Math.floor(30000 / 1000),
-    });
+    try {
+      const baseKey = `path:${fromAddress}-${toAddress}-${amount}`;
+      const jsonData = JSON.stringify(result);
+
+      // If data is small enough, store directly
+      if (jsonData.length < 900000) {
+        await this.tracker.redis.set(baseKey, jsonData, { ex: 30 });
+        return;
+      }
+
+      // Otherwise split into chunks of 800KB
+      const chunkSize = 800000;
+      const chunks = [];
+
+      for (let i = 0; i < jsonData.length; i += chunkSize) {
+        chunks.push(jsonData.slice(i, i + chunkSize));
+      }
+
+      // Store metadata
+      await this.tracker.redis.set(
+        `${baseKey}:meta`,
+        JSON.stringify({
+          chunks: chunks.length,
+          timestamp: Date.now(),
+        }),
+        { ex: 30 }
+      );
+
+      // Store chunks
+      for (let i = 0; i < chunks.length; i++) {
+        await this.tracker.redis.set(`${baseKey}:chunk:${i}`, chunks[i], {
+          ex: 30,
+        });
+      }
+    } catch (error) {
+      console.error("Error caching path result:", error);
+      // Fall back to in-memory cache on error
+      const inMemoryCacheKey = `${fromAddress}-${toAddress}-${amount}`;
+      this.tracker.pathCache.set(inMemoryCacheKey, result);
+      this.tracker.pathCacheExpiry.set(inMemoryCacheKey, Date.now() + 30000);
+    }
   }
 
   // Retrieve path from cache

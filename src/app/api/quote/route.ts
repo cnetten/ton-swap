@@ -153,48 +153,63 @@ async function findBestPathsBySource(
   const poolService = PoolService.getInstance();
   const tracker = poolService.getTracker();
 
-  // Check cache first for this exact swap
-  const cachedResult = await poolService.getPathFromCache(
-    fromAddress,
-    toAddress,
-    amountWithDecimals
-  );
+  // OPTIMIZATION: Check cache first with faster validation
+  const cacheKey = `path:${fromAddress}-${toAddress}-${amountWithDecimals}`;
+  const cachedData = await tracker.redis.get(cacheKey);
 
-  if (cachedResult) {
-    // Since we're in a serverless environment, we need better cache validation
-    // Get the latest update timestamps from Redis
-    const [lastDedustUpdate, lastStonfiUpdate] = await Promise.all([
-      tracker.redis.get("lastUpdate:dedust"),
-      tracker.redis.get("lastUpdate:stonfi"),
-    ]);
+  if (cachedData) {
+    try {
+      // Parse cached result
+      const cachedResult =
+        typeof cachedData === "string" ? JSON.parse(cachedData) : cachedData;
 
-    // Parse timestamps to ensure proper comparison
-    const pathCacheTime = cachedResult.timestamp || 0;
-    const dedustTimestamp = parseRedisTimestamp(lastDedustUpdate);
-    const stonfiTimestamp = parseRedisTimestamp(lastStonfiUpdate);
+      // Check if the cached result has a timestamp
+      const pathCacheTime = cachedResult.timestamp || 0;
+      const now = Date.now();
+      const cacheAge = now - pathCacheTime;
 
-    // Get the most recent update time
-    const latestUpdateTime = Math.max(dedustTimestamp, stonfiTimestamp);
+      // If cache is recent (less than 30 seconds), use it without further checks
+      if (cacheAge < 30000) {
+        console.log(`Using recent cached path result (${cacheAge}ms old)`);
+        return cachedResult;
+      }
 
-    // Only use cache if it's newer than the last pool update
-    if (pathCacheTime > latestUpdateTime) {
+      // For older cache, verify against pool updates
+      const [lastDedustUpdate, lastStonfiUpdate] = await Promise.all([
+        tracker.redis.get(`lastUpdate:dedust`),
+        tracker.redis.get(`lastUpdate:stonfi`),
+      ]);
+
+      // Parse timestamps for comparison
+      const dedustTimestamp = parseRedisTimestamp(lastDedustUpdate);
+      const stonfiTimestamp = parseRedisTimestamp(lastStonfiUpdate);
+
+      // Get the most recent update time
+      const latestUpdateTime = Math.max(dedustTimestamp, stonfiTimestamp);
+
+      // Only use cache if it's newer than the last pool update
+      if (pathCacheTime > latestUpdateTime) {
+        console.log(
+          `Using validated cached path (cache: ${new Date(
+            pathCacheTime
+          ).toISOString()}, last update: ${new Date(
+            latestUpdateTime
+          ).toISOString()})`
+        );
+        return cachedResult;
+      }
+
       console.log(
-        `Using cached path result (cache: ${new Date(
+        `Cache invalidated - cache time: ${new Date(
           pathCacheTime
-        ).toISOString()}, last update: ${new Date(
+        ).toISOString()}, latest update: ${new Date(
           latestUpdateTime
-        ).toISOString()})`
+        ).toISOString()}`
       );
-      return cachedResult;
+    } catch (error) {
+      console.error(`Error parsing cached result:`, error);
+      // Continue if parsing fails
     }
-
-    console.log(
-      `Cache invalidated - cache time: ${new Date(
-        pathCacheTime
-      ).toISOString()}, latest update: ${new Date(
-        latestUpdateTime
-      ).toISOString()}`
-    );
   }
 
   console.log("Fetching pools from all sources...");
@@ -297,13 +312,20 @@ async function findBestPathsBySource(
   // Combine all filtered pools for reference
   const allFilteredPools = [...filteredDedustPools, ...filteredStonfiPools];
 
-  const result = { bestDedustPath, bestStonfiPath, allFilteredPools };
+  const result = {
+    bestDedustPath,
+    bestStonfiPath,
+    allFilteredPools,
+    timestamp: Date.now(), // Add timestamp to result
+  };
 
   // Cache the result for future requests
-  poolService.cachePathResult(fromAddress, toAddress, amountWithDecimals, {
-    ...result,
-    timestamp: Date.now(),
-  });
+  poolService.cachePathResult(
+    fromAddress,
+    toAddress,
+    amountWithDecimals,
+    result
+  );
 
   return result;
 }

@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 import { DeDustClient } from "@dedust/sdk";
 import { StonApiClient } from "@ston-fi/api";
 import { Redis } from "@upstash/redis";
+import { fetchWithRetry } from "./utils/utils";
 
 interface TokenMetadata {
   name: string;
@@ -693,33 +694,27 @@ class PoolTracker extends EventEmitter {
         // Track if any reserves have changed to invalidate path cache
 
         // OPTIMIZATION: Reduce API timeouts from 10s to 2s
-        const dedustPromise = Promise.race([
-          this.dedustClient.getPools().catch((err) => {
-            console.error("Error fetching DeDust pools for fast update:", err);
-            return [] as DeDustPool[];
-          }),
-          new Promise(
-            (resolve) =>
-              setTimeout(() => {
-                console.warn("DeDust API timeout, using cached data");
-                resolve([]);
-              }, 10000) // Reduced from 10000ms to 2000ms
-          ),
-        ]);
+        const dedustPromise = fetchWithRetry(
+          async () => {
+            return await this.dedustClient.getPools().catch((err) => {
+              console.error("Error fetching DeDust pools:", err);
+              return [];
+            });
+          },
+          3,
+          1000
+        );
 
-        const stonfiPromise = Promise.race([
-          this.stonfiClient.getPools().catch((err) => {
-            console.error("Error fetching StonFi pools for fast update:", err);
-            return [] as StonFiPool[];
-          }),
-          new Promise(
-            (resolve) =>
-              setTimeout(() => {
-                console.warn("StonFi API timeout, using cached data");
-                resolve([]);
-              }, 10000) // Reduced from 10000ms to 2000ms
-          ),
-        ]);
+        const stonfiPromise = fetchWithRetry(
+          async () => {
+            return await this.stonfiClient.getPools().catch((err) => {
+              console.error("Error fetching StonFi pools:", err);
+              return [];
+            });
+          },
+          3,
+          1000
+        );
 
         const [dedustPools, stonfiResponse] = await Promise.all([
           dedustPromise,

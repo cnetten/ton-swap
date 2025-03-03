@@ -16,3 +16,23 @@ export function formatPrice(
     return "0.000000000";
   }
 }
+
+export async function fetchWithRetry(fetchFn, maxRetries = 3, delayMs = 1000) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetchFn();
+    } catch (error) {
+      lastError = error;
+      console.warn(`Attempt ${attempt}/${maxRetries} failed:`, error.message);
+
+      if (attempt < maxRetries) {
+        // Wait before retrying
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  throw lastError;
+}

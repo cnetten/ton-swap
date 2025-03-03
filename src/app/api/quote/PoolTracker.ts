@@ -197,7 +197,8 @@ class PoolTracker extends EventEmitter {
         return false;
       }
 
-      // Get the metadata about chunks
+      // CHANGE: Only check pool count for basic validation, not detailed reserve checks
+      // This will allow more frequent updates to ensure reserves are current
       const metadataKey = `pools:meta:${source}`;
       const metadataData = await this.redis.get(metadataKey);
 
@@ -220,17 +221,34 @@ class PoolTracker extends EventEmitter {
         return true;
       }
 
-      // Sample a few pools to check for changes
-      const sampleSize = Math.min(10, newPools.length);
-      const samples = [];
-
-      for (let i = 0; i < sampleSize; i++) {
-        const index = Math.floor(Math.random() * newPools.length);
-        samples.push(newPools[index]);
+      // CHANGE: Force update every 30 seconds regardless of detected changes
+      // This ensures reserves get updated even if our change detection missed something
+      if (now - lastUpdateValue > 30000) {
+        console.log(`Forcing update for ${source} after 30 seconds`);
+        return true;
       }
 
-      // Check these samples against Redis
-      for (const pool of samples) {
+      // CHANGE: Instead of random sampling, check pools with highest volume/activity
+      // This is more likely to catch meaningful reserve changes
+      const topPools = [...newPools]
+        .sort((a, b) => {
+          // Sort by total volume or another metric indicating activity
+          const aVolume =
+            a.stats?.volume?.reduce(
+              (sum, v) => sum + parseFloat(v || "0"),
+              0
+            ) || 0;
+          const bVolume =
+            b.stats?.volume?.reduce(
+              (sum, v) => sum + parseFloat(v || "0"),
+              0
+            ) || 0;
+          return bVolume - aVolume; // Descending order
+        })
+        .slice(0, 20); // Check top 20 pools instead of random 10
+
+      // Check these top pools against Redis
+      for (const pool of topPools) {
         // Which chunk would this pool be in?
         const chunkIndex = Math.floor(
           newPools.findIndex((p) => p.address === pool.address) /
@@ -272,7 +290,7 @@ class PoolTracker extends EventEmitter {
         }
       }
 
-      // No significant changes detected
+      // No significant changes detected in top pools
       console.log(
         `No significant changes detected for ${source}, skipping Redis update`
       );
@@ -633,6 +651,7 @@ class PoolTracker extends EventEmitter {
     this.isTracking = true;
 
     // Define fast update function for real-time data with debounce logic
+    // This function should be placed inside the startTracking method
     const performFastUpdate = async () => {
       // CRITICAL: Skip if update already in progress
       if (this.fastUpdateInProgress) {
@@ -665,6 +684,9 @@ class PoolTracker extends EventEmitter {
         // Mark update in progress
         await this.redis.set("fastUpdateTimestamp", now, { ex: 10 });
 
+        // Track if any reserves have changed to invalidate path cache
+        let anyReservesChanged = false;
+
         // OPTIMIZATION: Reduce API timeouts from 10s to 2s
         const dedustPromise = Promise.race([
           this.dedustClient.getPools().catch((err) => {
@@ -676,7 +698,7 @@ class PoolTracker extends EventEmitter {
               setTimeout(() => {
                 console.warn("DeDust API timeout, using cached data");
                 resolve([]);
-              }, 2000) // Reduced from 10000ms to 2000ms
+              }, 10000) // Reduced from 10000ms to 2000ms
           ),
         ]);
 
@@ -690,7 +712,7 @@ class PoolTracker extends EventEmitter {
               setTimeout(() => {
                 console.warn("StonFi API timeout, using cached data");
                 resolve([]);
-              }, 2000) // Reduced from 10000ms to 2000ms
+              }, 10000) // Reduced from 10000ms to 2000ms
           ),
         ]);
 
@@ -749,6 +771,19 @@ class PoolTracker extends EventEmitter {
                 const existingPool = poolMap.get(pool.address);
 
                 if (existingPool) {
+                  // Check if reserves have changed - IMPORTANT NEW CODE
+                  if (pool.reserves && existingPool.reserves) {
+                    if (
+                      pool.reserves.join(",") !==
+                      existingPool.reserves.join(",")
+                    ) {
+                      anyReservesChanged = true;
+                      console.log(
+                        `Reserves changed for pool ${pool.address}: [${existingPool.reserves}] -> [${pool.reserves}]`
+                      );
+                    }
+                  }
+
                   // Merge the update with existing data to preserve metadata
                   poolMap.set(pool.address, {
                     ...existingPool, // Keep existing fields
@@ -767,6 +802,8 @@ class PoolTracker extends EventEmitter {
                     lastUpdateTimestamp: now,
                   });
                   addedCount++;
+                  // New pools should also invalidate path cache
+                  anyReservesChanged = true;
                 }
               }
 
@@ -793,6 +830,12 @@ class PoolTracker extends EventEmitter {
               `No ${source} pools received from API in this update cycle`
             );
           }
+        }
+
+        // IMPORTANT NEW CODE: Clear path cache if any reserves changed
+        if (anyReservesChanged) {
+          console.log("Reserves changed, clearing path cache");
+          this.clearPathCache();
         }
       } catch (error) {
         console.error("Fast update error:", error);
@@ -847,7 +890,7 @@ class PoolTracker extends EventEmitter {
                   "DeDust API timeout during full update, using cached data"
                 );
                 resolve([]);
-              }, 3000) // Reduced from 8000ms to 3000ms
+              }, 10000) // Reduced from 8000ms to 3000ms
           ),
         ]);
 
@@ -863,7 +906,7 @@ class PoolTracker extends EventEmitter {
                   "StonFi API timeout during full update, using cached data"
                 );
                 resolve([]);
-              }, 3000) // Reduced from 8000ms to 3000ms
+              }, 10000) // Reduced from 8000ms to 3000ms
           ),
         ]);
 

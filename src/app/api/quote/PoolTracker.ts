@@ -757,7 +757,7 @@ class PoolTracker extends EventEmitter {
 
         // Track if any reserves have changed to invalidate path cache
         let reservesChanged = false;
-        let changedPools = [];
+        const changedPools = [];
 
         // OPTIMIZATION: Reduce API timeouts from 10s to 2s
         const dedustPromise = fetchWithRetry(

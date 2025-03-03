@@ -124,6 +124,21 @@ async function initializePoolService(): Promise<void> {
   console.log("PoolService initialized");
 }
 
+function parseRedisTimestamp(redisValue: any): number {
+  if (!redisValue) return 0;
+
+  if (typeof redisValue === "number") {
+    return redisValue;
+  }
+
+  if (typeof redisValue === "string") {
+    const parsed = parseInt(redisValue);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+
+  return 0;
+}
+
 // Process and find best paths for each exchange source separately
 async function findBestPathsBySource(
   fromAddress: string,
@@ -144,17 +159,42 @@ async function findBestPathsBySource(
     toAddress,
     amountWithDecimals
   );
-  if (cachedResult) {
-    // Check if pools have been updated since the path was cached
-    const lastPoolUpdate = await tracker.redis.get(`lastUpdate:dedust`);
-    const pathCacheTime = cachedResult.timestamp || 0;
 
-    if (lastPoolUpdate && pathCacheTime < lastPoolUpdate) {
-      console.log("Pools updated since path was cached, recalculating");
-    } else {
-      console.log("Using cached path result");
+  if (cachedResult) {
+    // Since we're in a serverless environment, we need better cache validation
+    // Get the latest update timestamps from Redis
+    const [lastDedustUpdate, lastStonfiUpdate] = await Promise.all([
+      tracker.redis.get("lastUpdate:dedust"),
+      tracker.redis.get("lastUpdate:stonfi"),
+    ]);
+
+    // Parse timestamps to ensure proper comparison
+    const pathCacheTime = cachedResult.timestamp || 0;
+    const dedustTimestamp = parseRedisTimestamp(lastDedustUpdate);
+    const stonfiTimestamp = parseRedisTimestamp(lastStonfiUpdate);
+
+    // Get the most recent update time
+    const latestUpdateTime = Math.max(dedustTimestamp, stonfiTimestamp);
+
+    // Only use cache if it's newer than the last pool update
+    if (pathCacheTime > latestUpdateTime) {
+      console.log(
+        `Using cached path result (cache: ${new Date(
+          pathCacheTime
+        ).toISOString()}, last update: ${new Date(
+          latestUpdateTime
+        ).toISOString()})`
+      );
       return cachedResult;
     }
+
+    console.log(
+      `Cache invalidated - cache time: ${new Date(
+        pathCacheTime
+      ).toISOString()}, latest update: ${new Date(
+        latestUpdateTime
+      ).toISOString()}`
+    );
   }
 
   console.log("Fetching pools from all sources...");
@@ -300,7 +340,7 @@ export async function POST(req: Request) {
   const startTime = performance.now();
 
   try {
-    const { fromAddress, toAddress, amount, slippageTolerance } =
+    const { fromAddress, toAddress, amount, slippageTolerance, forceRefresh } =
       await req.json();
 
     if (!fromAddress || !toAddress || !amount || isNaN(amount) || amount <= 0) {
@@ -321,7 +361,15 @@ export async function POST(req: Request) {
         : toAddress;
 
     const poolService = PoolService.getInstance();
+    const tracker = poolService.getTracker();
 
+    if (forceRefresh) {
+      console.log("Force refreshing pools before quote");
+      await tracker.performFastUpdate();
+    } else {
+      // Check if we need an update - pass false to potentially trigger an update
+      await tracker.triggerUpdateIfNeeded(false);
+    }
     // Always pass skipUpdate=true to avoid triggering updates during quote requests
     const [dedustPools, stonfiPools] = await Promise.all([
       poolService.getPoolsBySource("dedust", true),

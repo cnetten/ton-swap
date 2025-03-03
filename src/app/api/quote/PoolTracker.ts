@@ -437,6 +437,9 @@ class PoolTracker extends EventEmitter {
   public async updateBulkPoolStates(pools: Pool[]): Promise<void> {
     if (pools.length === 0) return;
 
+    // Track if any reserves have changed to invalidate path cache
+    let reservesChanged = false;
+
     // Update Redis cache first (this is fast)
     try {
       // Group pools by source
@@ -464,12 +467,21 @@ class PoolTracker extends EventEmitter {
 
           // Update existing or add new pools
           for (const pool of sourcePools) {
-            // CRITICAL FIX: Make sure we preserve all fields when updating
             // Get existing pool first
             const existingPool = poolMap.get(pool.address);
 
             if (existingPool) {
-              // Merge the update with existing data instead of replacing everything
+              // Check if reserves have changed
+              if (pool.reserves && existingPool.reserves) {
+                if (
+                  pool.reserves.join(",") !== existingPool.reserves.join(",")
+                ) {
+                  reservesChanged = true;
+                  console.log(`Reserves changed for pool ${pool.address}`);
+                }
+              }
+
+              // Merge the update with existing data
               poolMap.set(pool.address, {
                 ...existingPool, // Keep all existing fields
                 ...pool, // Apply updates
@@ -479,11 +491,13 @@ class PoolTracker extends EventEmitter {
                 lastUpdateTimestamp: Date.now(),
               });
             } else {
-              // For new pools, just add them directly
+              // For new pools, add them directly
               poolMap.set(pool.address, {
                 ...pool,
                 lastUpdateTimestamp: Date.now(),
               });
+              // New pool should also invalidate path cache
+              reservesChanged = true;
             }
           }
 
@@ -499,6 +513,11 @@ class PoolTracker extends EventEmitter {
 
       // Emit events immediately for updates
       pools.forEach((pool) => this.emit("poolStateUpdated", pool));
+
+      if (reservesChanged) {
+        console.log("Reserves changed, clearing path cache");
+        this.clearPathCache();
+      }
 
       return;
     } catch (error) {
@@ -1522,6 +1541,12 @@ class PoolTracker extends EventEmitter {
       // Force a full update
       await this.performFullUpdate();
     }
+  }
+
+  public clearPathCache(): void {
+    console.log(`Clearing path cache with ${this.pathCache.size} entries`);
+    this.pathCache.clear();
+    this.pathCacheExpiry.clear();
   }
 }
 

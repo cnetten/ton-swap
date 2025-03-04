@@ -2,7 +2,7 @@ import { ClientProvider } from "@/components/providers/ClientProvider";
 import { Layout } from "@/components/layout/Layout";
 import { Inter } from "next/font/google";
 import "./globals.css";
-
+import { Analytics } from "@vercel/analytics/react";
 const inter = Inter({ subsets: ["latin"] });
 
 export default function RootLayout({
@@ -14,6 +14,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <ClientProvider>
+          <Analytics />
           <Layout>{children}</Layout>
         </ClientProvider>
       </body>

@@ -384,7 +384,7 @@ export async function POST(req: Request) {
 
     const poolService = PoolService.getInstance();
     const tracker = poolService.getTracker();
-
+    tracker.redisCacheData.clear();
     if (forceRefresh) {
       console.log("Force refreshing pools before quote");
       const tracker = poolService.getTracker();

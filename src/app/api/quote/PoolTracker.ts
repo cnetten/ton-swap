@@ -87,7 +87,7 @@ class PoolTracker extends EventEmitter {
   private readonly FULL_UPDATE_INTERVAL = 60000; // 60 seconds between full updates
   private trackingIntervals: NodeJS.Timeout[] = [];
   public redis: Redis;
-  private redisCacheData: Map<string, Pool[]> = new Map();
+  public redisCacheData: Map<string, Pool[]> = new Map();
   private readonly CHUNK_SIZE = 200; // Number of pools per chunk, adjust as needed
   private readonly CHUNK_KEY_PREFIX = "pools:chunk:";
   private readonly UPDATE_IN_PROGRESS_KEY = "updateInProgress";

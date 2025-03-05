@@ -1563,6 +1563,34 @@ class PoolTracker extends EventEmitter {
     }
   }
 
+  private async shouldRefreshPools(source: string): Promise<boolean> {
+    try {
+      // Check when this source was last updated
+      const lastUpdateKey = `lastUpdate:${source}`;
+      const lastUpdateData = await this.redis.get(lastUpdateKey);
+
+      if (!lastUpdateData) {
+        // No record of update, should refresh
+        return true;
+      }
+
+      const lastUpdate =
+        typeof lastUpdateData === "string"
+          ? parseInt(lastUpdateData)
+          : typeof lastUpdateData === "number"
+          ? lastUpdateData
+          : 0;
+
+      const now = Date.now();
+      // If data is older than 2 minutes, refresh
+      return now - lastUpdate > 120000;
+    } catch (error) {
+      console.error(`Error checking if ${source} pools need refresh:`, error);
+      // On error, assume refresh is needed
+      return true;
+    }
+  }
+
   // Get latest pools with optimized update checking
   async getLatestPools(
     source: string,

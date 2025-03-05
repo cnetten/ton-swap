@@ -1104,12 +1104,6 @@ class PoolTracker extends EventEmitter {
               ).toISOString()}`
             );
           }
-          for (const source of ["dedust", "stonfi"]) {
-            const sourcePools = this.redisCacheData.get(source);
-            if (sourcePools && sourcePools.length > 0) {
-              await this.storeQuickResponseData(source, sourcePools);
-            }
-          }
         }
       } catch (error) {
         console.error("Fast update error:", error);
@@ -1567,11 +1561,6 @@ class PoolTracker extends EventEmitter {
         // Update in-memory cache with Redis data
         this.redisCacheData.set(source, pools);
 
-        // OPTIMIZATION: Store quick response data for future requests
-        this.storeQuickResponseData(source, pools).catch((err) =>
-          console.error(`Error storing quick response data for ${source}:`, err)
-        );
-
         // OPTIMIZATION: Any pools with minimum structure are good enough for quotes
         return pools;
       }
@@ -1647,11 +1636,6 @@ class PoolTracker extends EventEmitter {
       } catch (error) {
         console.error("Error fetching StonFi pools:", error);
       }
-    }
-
-    // Store quick response data for future requests
-    if (apiPools.length > 0) {
-      await this.storeQuickResponseData(source, apiPools);
     }
 
     // Store in Redis for future use

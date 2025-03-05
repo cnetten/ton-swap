@@ -384,40 +384,137 @@ export async function POST(req: Request) {
 
     const poolService = PoolService.getInstance();
     const tracker = poolService.getTracker();
-    tracker.redisCacheData.clear();
-    if (forceRefresh) {
-      console.log("Force refreshing pools before quote");
-      const tracker = poolService.getTracker();
-      await tracker.performFastUpdate();
+
+    // OPTIMIZATION: Use in-memory cache for faster token decimal lookups
+    let dedustPools = tracker.redisCacheData.get("dedust") || [];
+    let stonfiPools = tracker.redisCacheData.get("stonfi") || [];
+
+    // Combine pools for the initial decimals lookup
+    let allPools = [...dedustPools, ...stonfiPools];
+
+    // If memory cache is empty, quickly check if we have the "quick" data in Redis
+    if (allPools.length === 0) {
+      try {
+        const quickDedustData = await tracker.redis.get("quick:dedust");
+        const quickStonfiData = await tracker.redis.get("quick:stonfi");
+
+        if (quickDedustData) {
+          dedustPools = JSON.parse(
+            typeof quickDedustData === "string"
+              ? quickDedustData
+              : JSON.stringify(quickDedustData)
+          );
+          tracker.redisCacheData.set("dedust", dedustPools);
+        }
+
+        if (quickStonfiData) {
+          stonfiPools = JSON.parse(
+            typeof quickStonfiData === "string"
+              ? quickStonfiData
+              : JSON.stringify(quickStonfiData)
+          );
+          tracker.redisCacheData.set("stonfi", stonfiPools);
+        }
+
+        allPools = [...dedustPools, ...stonfiPools];
+      } catch (error) {
+        console.error("Error loading quick data from Redis:", error);
+      }
     }
-    // Always pass skipUpdate=true to avoid triggering updates during quote requests
-    const [dedustPools, stonfiPools] = await Promise.all([
-      poolService.getPoolsBySource("dedust", true),
-      poolService.getPoolsBySource("stonfi", true),
-    ]);
 
-    // Combine all pools for decimals lookup
-    const allPools = [...dedustPools, ...stonfiPools];
+    // If we still have no pools, fall back to full Redis load
+    if (allPools.length === 0) {
+      // Only load from Redis if memory cache is empty
+      [dedustPools, stonfiPools] = await Promise.all([
+        poolService.getPoolsBySource("dedust", true), // skipUpdate=true to avoid delays
+        poolService.getPoolsBySource("stonfi", true),
+      ]);
 
-    // Get fromDecimals before finding paths
+      allPools = [...dedustPools, ...stonfiPools];
+    }
+
+    // Calculate amount with decimals for path finding
+    // Default to 9 decimals until we can determine the actual decimals
     const fromDecimals = getTokenDecimals(actualFromAddress, allPools);
     const amountNumber = Number(amount);
     const amountInteger = Math.floor(amountNumber * 10 ** fromDecimals);
-    console.log(amountInteger);
     const amountWithDecimals = BigInt(amountInteger).toString();
 
-    // Convert slippageTolerance to decimal (e.g., 0.5 -> 0.005)
-    const slippageDecimal = (slippageTolerance || 0.5) / 100;
-    console.log(`Using slippage tolerance: ${slippageDecimal * 100}%`);
-
-    // Find best paths for each exchange separately - this will use skipUpdate=true internally
-    const { bestDedustPath, bestStonfiPath, allFilteredPools } =
-      await findBestPathsBySource(
+    // Try to get cached path if not forcing refresh
+    if (!forceRefresh) {
+      const cachedPath = await tracker.getPathFromCache(
         actualFromAddress,
         actualToAddress,
-        amountWithDecimals,
-        slippageDecimal
+        amountWithDecimals
       );
+
+      if (cachedPath) {
+        console.log("Using cached path result");
+        const endTime = performance.now();
+        const requestTime = Math.round(endTime - startTime);
+
+        // Add request time to the response
+        return NextResponse.json({
+          ...cachedPath,
+          requestTimeMs: requestTime,
+          fromCache: true,
+        });
+      }
+    }
+
+    // No cached result or force refresh requested - continue with normal flow
+    if (forceRefresh) {
+      console.log("Force refreshing pools before quote");
+      tracker.redisCacheData.clear();
+      // Only perform update if explicitly requested
+      await tracker.performFastUpdate();
+
+      // Reload pools after update
+      [dedustPools, stonfiPools] = await Promise.all([
+        poolService.getPoolsBySource("dedust", true),
+        poolService.getPoolsBySource("stonfi", true),
+      ]);
+
+      allPools = [...dedustPools, ...stonfiPools];
+    }
+
+    // OPTIMIZATION: If we have fewer than 10 pools total, something is wrong
+    // Try a fast update but don't wait for it to complete
+    if (allPools.length < 10) {
+      console.log("Not enough pools loaded, triggering background fast update");
+      // Don't await - let it happen in the background
+      tracker
+        .performFastUpdate()
+        .catch((err) => console.error("Background update error:", err));
+    }
+
+    // Get accurate fromDecimals based on available pools
+    const actualFromDecimals = getTokenDecimals(actualFromAddress, allPools);
+    const preciseAmountInteger = Math.floor(
+      amountNumber * 10 ** actualFromDecimals
+    );
+    const preciseAmountWithDecimals = BigInt(preciseAmountInteger).toString();
+
+    // Convert slippageTolerance to decimal
+    const slippageDecimal = (slippageTolerance || 0.5) / 100;
+
+    // OPTIMIZATION: Use a timeout for the path finding to avoid long-running functions
+    // This helps prevent Vercel function timeouts
+    const pathFindingPromise = findBestPathsBySource(
+      actualFromAddress,
+      actualToAddress,
+      preciseAmountWithDecimals,
+      slippageDecimal
+    );
+
+    // Set a reasonable timeout for path finding (8 seconds)
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Path finding timed out")), 8000);
+    });
+
+    // Race between path finding and timeout
+    const { bestDedustPath, bestStonfiPath, allFilteredPools } =
+      (await Promise.race([pathFindingPromise, timeoutPromise])) as any;
 
     // Select the best path overall
     const bestPath = selectBestPath(bestDedustPath, bestStonfiPath);
@@ -439,7 +536,7 @@ export async function POST(req: Request) {
                 pathDepth: bestStonfiPath.pathDepth,
               }
             : null,
-        }, // Include the source in the result
+        },
       });
     }
 
@@ -452,7 +549,7 @@ export async function POST(req: Request) {
       outPutMint: toAddress,
       pools: bestPath.pools,
       estimatedOutput: normalizeAmount(bestPath.outputAmount, toDecimals),
-      inputAmount: normalizeAmount(bestPath.inputAmount, fromDecimals),
+      inputAmount: normalizeAmount(bestPath.inputAmount, actualFromDecimals),
       minimumAmountOut:
         Number(normalizeAmount(bestPath.outputAmount, toDecimals)) -
         Number(normalizeAmount(bestPath.outputAmount, toDecimals)) *
@@ -460,17 +557,17 @@ export async function POST(req: Request) {
       estimatedGasFees: 0,
       outPerIn: (
         Number(normalizeAmount(bestPath.outputAmount, toDecimals)) /
-        Number(normalizeAmount(bestPath.inputAmount, fromDecimals))
+        Number(normalizeAmount(bestPath.inputAmount, actualFromDecimals))
       ).toFixed(9),
       pathDepth: bestPath.pathDepth + 1,
-      source: bestPath.source, // Include the source in the result
+      source: bestPath.source,
     };
 
     const endTime = performance.now();
     const requestTime = Math.round(endTime - startTime);
     console.log(`Request processed in ${requestTime}ms`);
 
-    return NextResponse.json({
+    const result = {
       swapPaths: [formattedPath],
       exchangeComparison: {
         dedust: bestDedustPath
@@ -494,7 +591,19 @@ export async function POST(req: Request) {
         bestExchange: bestPath.source,
         requestTimeMs: requestTime,
       },
-    });
+    };
+
+    // Cache the path in the background
+    poolService
+      .cachePathResult(
+        actualFromAddress,
+        actualToAddress,
+        preciseAmountWithDecimals,
+        result
+      )
+      .catch((err) => console.error("Error caching path:", err));
+
+    return NextResponse.json(result);
   } catch (error: any) {
     console.error("Error in POST handler:", error);
     const endTime = performance.now();

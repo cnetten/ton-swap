@@ -228,11 +228,12 @@ class PoolTracker extends EventEmitter {
         return false;
       }
 
-      // Check sample of pools for changes - more efficient for Vercel
-      const checkSampleSize = Math.min(10, newPools.length);
-      const sampleIndexes = Array.from({ length: checkSampleSize }, () =>
-        Math.floor(Math.random() * newPools.length)
-      );
+      // IMPORTANT CHANGE: Force update every 30 seconds regardless of detected changes
+      // This ensures we don't have stale data for too long
+      if (lastUpdateValue && now - lastUpdateValue > 30000) {
+        console.log(`Forcing update for ${source} after 30 seconds`);
+        return true;
+      }
 
       // Get metadata to access existing pools
       const metadataKey = `pools:meta:${source}`;
@@ -252,60 +253,81 @@ class PoolTracker extends EventEmitter {
         return true;
       }
 
-      // Fetch a sample of chunks
-      const chunkPromises = [];
-      const chunkIndexes = [0]; // Always check first chunk
-      if (metadata.chunks > 1) {
-        // Add one random chunk if there are multiple
-        chunkIndexes.push(Math.floor(Math.random() * metadata.chunks));
+      // IMPORTANT IMPROVEMENT: Instead of random sampling, check top volume pools
+      // and recent activity pools. This ensures important pools are always checked.
+
+      // Fetch the first chunk (which typically contains high-volume pools)
+      const firstChunkKey = `${this.CHUNK_KEY_PREFIX}${source}:0`;
+      const firstChunkData = await this.redis.get(firstChunkKey);
+
+      if (!firstChunkData) {
+        return true;
       }
 
-      for (const i of chunkIndexes) {
-        const chunkKey = `${this.CHUNK_KEY_PREFIX}${source}:${i}`;
-        chunkPromises.push(this.redis.get(chunkKey));
-      }
+      const firstChunk =
+        typeof firstChunkData === "string"
+          ? JSON.parse(firstChunkData)
+          : firstChunkData;
 
-      const chunkResults = await Promise.all(chunkPromises);
-
-      // Build a map of sample existing pools
+      // Create map of existing high-volume pools
       const existingPoolMap = new Map<string, Pool>();
-      for (const chunkData of chunkResults) {
-        if (chunkData) {
-          const chunk =
-            typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
-          for (const pool of chunk) {
+      for (const pool of firstChunk) {
+        existingPoolMap.set(pool.address, pool);
+      }
+
+      // Also check pools with recent activity from the "recentlyChanged" set if available
+      const recentlyChangedKey = `recentlyChanged:${source}`;
+      const recentlyChangedPoolsData = await this.redis.get(recentlyChangedKey);
+
+      if (recentlyChangedPoolsData) {
+        const recentlyChangedPools =
+          typeof recentlyChangedPoolsData === "string"
+            ? JSON.parse(recentlyChangedPoolsData)
+            : recentlyChangedPoolsData;
+
+        // Fetch these pools from appropriate chunks
+        for (const poolAddress of recentlyChangedPools) {
+          // For simplicity, just check in the first chunk again
+          const pool = firstChunk.find((p: Pool) => p.address === poolAddress);
+          if (pool) {
             existingPoolMap.set(pool.address, pool);
           }
         }
       }
 
-      // Check sampled pools for changes
+      // Check for changes in all new pools that match our existing high-importance pools
       let changesFound = 0;
-      for (const idx of sampleIndexes) {
-        const newPool = newPools[idx];
+      const recentlyChanged: string[] = [];
+
+      for (const newPool of newPools) {
         if (!newPool || !newPool.address) continue;
 
         const existingPool = existingPoolMap.get(newPool.address);
-        if (!existingPool) {
-          console.log(`New pool found: ${newPool.address}`);
-          return true;
-        }
+        if (!existingPool) continue;
 
         if (newPool.reserves && existingPool.reserves) {
           if (newPool.reserves.join(",") !== existingPool.reserves.join(",")) {
             changesFound++;
+            recentlyChanged.push(newPool.address);
             console.log(
               `Reserve changed for pool ${newPool.address}: [${existingPool.reserves}] -> [${newPool.reserves}]`
             );
 
+            // If we find enough changes, update immediately
             if (changesFound >= 3) {
-              console.log(
-                `Found ${changesFound} changes in sample, updating data`
-              );
-              return true;
+              break;
             }
           }
         }
+      }
+
+      // Store the recently changed pools for next check
+      if (recentlyChanged.length > 0) {
+        await this.redis.set(
+          recentlyChangedKey,
+          JSON.stringify(recentlyChanged),
+          { ex: 300 } // 5 minute expiry
+        );
       }
 
       return changesFound > 0;
@@ -436,7 +458,7 @@ class PoolTracker extends EventEmitter {
   }
 
   // Retrieves pools from chunks and reconstitutes them
-  private async getPoolsFromChunks(source: string): Promise<Pool[]> {
+  public async getPoolsFromChunks(source: string): Promise<Pool[]> {
     try {
       // Check if we have it in memory cache first
       if (this.redisCacheData.has(source)) {
@@ -529,6 +551,7 @@ class PoolTracker extends EventEmitter {
 
     // Track if any reserves have changed to invalidate path cache
     let reservesChanged = false;
+    const changedTokens = new Set<string>();
 
     // Update Redis cache first (this is fast)
     try {
@@ -567,6 +590,14 @@ class PoolTracker extends EventEmitter {
                   pool.reserves.join(",") !== existingPool.reserves.join(",")
                 ) {
                   reservesChanged = true;
+
+                  // NEW: Track tokens in this pool for targeted path invalidation
+                  if (pool.assets && pool.assets.length > 0) {
+                    pool.assets.forEach((asset) => {
+                      const tokenId = asset.address || asset.type;
+                      if (tokenId) changedTokens.add(tokenId);
+                    });
+                  }
                 }
               }
 
@@ -587,6 +618,14 @@ class PoolTracker extends EventEmitter {
               });
               // New pool should also invalidate path cache
               reservesChanged = true;
+
+              // Track tokens in new pools too
+              if (pool.assets && pool.assets.length > 0) {
+                pool.assets.forEach((asset) => {
+                  const tokenId = asset.address || asset.type;
+                  if (tokenId) changedTokens.add(tokenId);
+                });
+              }
             }
           }
 
@@ -604,8 +643,17 @@ class PoolTracker extends EventEmitter {
       pools.forEach((pool) => this.emit("poolStateUpdated", pool));
 
       if (reservesChanged) {
-        console.log("Reserves changed, clearing path cache");
-        this.clearPathCache();
+        // IMPORTANT IMPROVEMENT: Instead of clearing all path caches, invalidate only relevant ones
+        if (changedTokens.size <= 5) {
+          // If only a few tokens changed, do targeted invalidation
+          const invalidationPromises = Array.from(changedTokens).map(
+            (tokenId) => this.invalidatePathsForToken(tokenId)
+          );
+          await Promise.all(invalidationPromises);
+        } else {
+          // If many tokens changed, clear the entire cache
+          this.clearPathCache();
+        }
       }
 
       return;
@@ -710,6 +758,206 @@ class PoolTracker extends EventEmitter {
       source: "stonfi",
       lastUpdateTimestamp: Date.now(),
     };
+  }
+
+  public async storeQuickResponseData(
+    source: string,
+    pools: Pool[]
+  ): Promise<void> {
+    try {
+      // Store a smaller, optimized version in a fast-access key
+      // This will be used for immediate responses while the main data refreshes
+      const minimalPools = pools.map((pool) => ({
+        address: pool.address,
+        reserves: pool.reserves,
+        assets: pool.assets,
+        tradeFee: pool.tradeFee,
+        source: pool.source,
+        lastUpdateTimestamp: Date.now(),
+      }));
+
+      // Serialize the data
+      const jsonData = JSON.stringify(minimalPools);
+
+      // Check if the data exceeds Upstash's 1MB limit (use 900KB to be safe)
+      const MAX_REDIS_SIZE = 900000; // ~900KB
+
+      if (jsonData.length <= MAX_REDIS_SIZE) {
+        // If small enough, store directly with a short TTL
+        await this.redis.set(`quick:${source}`, jsonData, {
+          ex: 300,
+        });
+        console.log(
+          `Stored ${minimalPools.length} quick access pools for ${source}`
+        );
+      } else {
+        // If too large, store in chunks
+        console.log(
+          `Quick data for ${source} is ${(
+            jsonData.length /
+            1024 /
+            1024
+          ).toFixed(2)}MB, chunking...`
+        );
+
+        // Calculate how many chunks we need
+        const chunkSize = 200; // ~200 pools per chunk
+        const numChunks = Math.ceil(minimalPools.length / chunkSize);
+
+        // Store metadata
+        await this.redis.set(
+          `quick:${source}:meta`,
+          JSON.stringify({
+            totalPools: minimalPools.length,
+            chunks: numChunks,
+            timestamp: Date.now(),
+          }),
+          { ex: 300 }
+        );
+
+        // Store each chunk
+        for (let i = 0; i < numChunks; i++) {
+          const chunkStart = i * chunkSize;
+          const chunkEnd = Math.min((i + 1) * chunkSize, minimalPools.length);
+          const chunk = minimalPools.slice(chunkStart, chunkEnd);
+
+          await this.redis.set(
+            `quick:${source}:chunk:${i}`,
+            JSON.stringify(chunk),
+            {
+              ex: 300,
+            }
+          );
+        }
+
+        console.log(
+          `Stored ${minimalPools.length} quick access pools for ${source} in ${numChunks} chunks`
+        );
+      }
+    } catch (error) {
+      console.error(`Error storing quick response data for ${source}:`, error);
+
+      // If we failed due to size, try storing a more minimal version with fewer pools
+      if (error.toString().includes("max request size exceeded")) {
+        try {
+          console.log(
+            `Attempting to store ultra-minimal data for ${source}...`
+          );
+          // Create an ultra-minimal version with just essential data for the first 1000 pools
+          const ultraMinimalPools = pools.slice(0, 1000).map((pool) => ({
+            address: pool.address,
+            reserves: pool.reserves,
+            source: pool.source,
+          }));
+
+          await this.redis.set(
+            `quick:${source}:minimal`,
+            JSON.stringify(ultraMinimalPools),
+            {
+              ex: 300,
+            }
+          );
+          console.log(
+            `Stored ${ultraMinimalPools.length} ultra-minimal pools for ${source}`
+          );
+        } catch (fallbackError) {
+          console.error(
+            `Failed to store even minimal data for ${source}:`,
+            fallbackError
+          );
+        }
+      }
+    }
+  }
+
+  public async getQuickResponseData(source: string): Promise<Pool[]> {
+    try {
+      // First try to get the direct quick data
+      const quickData = await this.redis.get(`quick:${source}`);
+
+      if (quickData) {
+        // Parse and return the data
+        const pools = JSON.parse(
+          typeof quickData === "string" ? quickData : JSON.stringify(quickData)
+        );
+
+        if (Array.isArray(pools) && pools.length > 0) {
+          console.log(`Retrieved ${pools.length} quick pools for ${source}`);
+          return pools;
+        }
+      }
+
+      // If direct data is not available, check for chunked data
+      const metaData = await this.redis.get(`quick:${source}:meta`);
+
+      if (metaData) {
+        const meta = JSON.parse(
+          typeof metaData === "string" ? metaData : JSON.stringify(metaData)
+        );
+
+        if (meta && meta.chunks) {
+          console.log(
+            `Found ${meta.chunks} chunks of quick data for ${source}`
+          );
+
+          // Retrieve all chunks
+          const chunkPromises = [];
+          for (let i = 0; i < meta.chunks; i++) {
+            chunkPromises.push(this.redis.get(`quick:${source}:chunk:${i}`));
+          }
+
+          const chunks = await Promise.all(chunkPromises);
+
+          // Combine all chunks
+          let allPools: Pool[] = [];
+          for (const chunk of chunks) {
+            if (chunk) {
+              const poolChunk = JSON.parse(
+                typeof chunk === "string" ? chunk : JSON.stringify(chunk)
+              );
+
+              if (Array.isArray(poolChunk)) {
+                allPools = allPools.concat(poolChunk);
+              }
+            }
+          }
+
+          if (allPools.length > 0) {
+            console.log(
+              `Retrieved ${allPools.length} quick pools from chunks for ${source}`
+            );
+            return allPools;
+          }
+        }
+      }
+
+      // Try the ultra-minimal fallback
+      const minimalData = await this.redis.get(`quick:${source}:minimal`);
+
+      if (minimalData) {
+        const minimalPools = JSON.parse(
+          typeof minimalData === "string"
+            ? minimalData
+            : JSON.stringify(minimalData)
+        );
+
+        if (Array.isArray(minimalPools) && minimalPools.length > 0) {
+          console.log(
+            `Retrieved ${minimalPools.length} ultra-minimal pools for ${source}`
+          );
+          return minimalPools;
+        }
+      }
+
+      // If all methods fail, return an empty array
+      return [];
+    } catch (error) {
+      console.error(
+        `Error retrieving quick response data for ${source}:`,
+        error
+      );
+      return [];
+    }
   }
 
   async startTracking(): Promise<void> {
@@ -843,9 +1091,6 @@ class PoolTracker extends EventEmitter {
                       pool.reserves.join(",") !==
                       existingPool.reserves.join(",")
                     ) {
-                      console.log(
-                        `Reserves changed for pool ${pool.address}: [${existingPool.reserves}] -> [${pool.reserves}]`
-                      );
                       changedPools.push(pool.address);
                       reservesChanged = true;
                     }
@@ -902,11 +1147,6 @@ class PoolTracker extends EventEmitter {
 
         // IMPORTANT: Always clear path cache if reserves have changed
         if (reservesChanged) {
-          console.log(
-            `Reserves changed in pools [${changedPools.join(
-              ", "
-            )}], clearing path cache`
-          );
           await this.clearPathCache();
 
           // Update the lastUpdate timestamp for sources
@@ -926,6 +1166,12 @@ class PoolTracker extends EventEmitter {
                 now
               ).toISOString()}`
             );
+          }
+          for (const source of ["dedust", "stonfi"]) {
+            const sourcePools = this.redisCacheData.get(source);
+            if (sourcePools && sourcePools.length > 0) {
+              await this.storeQuickResponseData(source, sourcePools);
+            }
           }
         }
       } catch (error) {
@@ -1322,18 +1568,50 @@ class PoolTracker extends EventEmitter {
     source: string,
     skipUpdate: boolean = false
   ): Promise<Pool[]> {
-    // First check if we already have pools in memory cache
+    // First, check in-memory cache which is the fastest
     if (this.redisCacheData.has(source)) {
       const cachedPools = this.redisCacheData.get(source)!;
       if (cachedPools.length > 0) {
-        // OPTIMIZATION: Only trigger update if needed, but return cached data immediately
-        if (!skipUpdate) {
-          this.triggerUpdateIfNeeded(false).catch((err) =>
-            console.error("Background update error:", err)
-          );
+        // Trigger background update if needed but return cached data immediately
+        if (!skipUpdate && (await this.shouldRefreshPools(source))) {
+          // Use setTimeout to not block the current response
+          setTimeout(async () => {
+            console.log(`Background refreshing ${source} pools`);
+            try {
+              await this.triggerUpdateIfNeeded(false);
+            } catch (error) {
+              console.error(`Background update error for ${source}:`, error);
+            }
+          }, 10);
         }
         return cachedPools;
       }
+    }
+
+    // If memory cache is empty, try to get quick response data
+    try {
+      const quickPools = await this.getQuickResponseData(source);
+
+      if (quickPools.length > 0) {
+        // Store in redisCacheData for immediate access elsewhere
+        this.redisCacheData.set(source, quickPools);
+
+        // Trigger a background update if needed but don't wait for it
+        if (!skipUpdate && (await this.shouldRefreshPools(source))) {
+          setTimeout(async () => {
+            console.log(`Background refreshing ${source} pools`);
+            try {
+              await this.triggerUpdateIfNeeded(false);
+            } catch (error) {
+              console.error(`Background update error for ${source}:`, error);
+            }
+          }, 10);
+        }
+
+        return quickPools;
+      }
+    } catch (error) {
+      console.error(`Error getting quick response data for ${source}:`, error);
     }
 
     // Check if it's time to update first, passing the skipUpdate parameter
@@ -1345,7 +1623,14 @@ class PoolTracker extends EventEmitter {
       // Get pools from chunks
       const pools = await this.getPoolsFromChunks(source);
       if (pools.length > 0) {
-        // OPTIMIZATION: Any pools with minimum structure are good enough for quotes
+        // Update in-memory cache with Redis data
+        this.redisCacheData.set(source, pools);
+
+        // Store quick response data for future requests
+        this.storeQuickResponseData(source, pools).catch((err) =>
+          console.error(`Error storing quick response data for ${source}:`, err)
+        );
+
         return pools;
       }
     } catch (error) {
@@ -1427,6 +1712,11 @@ class PoolTracker extends EventEmitter {
       try {
         // Update memory cache immediately
         this.redisCacheData.set(source, apiPools);
+
+        // Store quick response data for future requests
+        this.storeQuickResponseData(source, apiPools).catch((err) =>
+          console.error(`Error storing quick response data for ${source}:`, err)
+        );
 
         // Store in Redis in the background
         this.storePoolsInChunks(source, apiPools).catch((redisError) => {
@@ -1682,15 +1972,105 @@ class PoolTracker extends EventEmitter {
 
   public async clearPathCache(): Promise<void> {
     try {
-      // Get all path cache keys
-      const pathKeys = await this.redis.keys("path:*");
-      console.log(`Clearing Redis path cache with ${pathKeys.length} entries`);
+      // Use SCAN to delete path cache entries
+      let cursor = "0";
+      let totalDeleted = 0;
 
-      if (pathKeys.length > 0) {
-        await Promise.all(pathKeys.map((key) => this.redis.del(key)));
-      }
+      do {
+        // SCAN with a reasonable batch size
+        const scanResult = await this.redis.scan(cursor, {
+          match: "path:*",
+          count: 100,
+        });
+
+        // Extract the new cursor and matching keys
+        if (Array.isArray(scanResult) && scanResult.length >= 1) {
+          cursor = scanResult[0].toString();
+          const keys = scanResult[1] || [];
+
+          // Delete keys in batches if any were found
+          if (keys.length > 0) {
+            await this.redis.del(...keys);
+            totalDeleted += keys.length;
+          }
+        } else {
+          // Handle unexpected response format
+          console.warn("Unexpected SCAN response format:", scanResult);
+          break;
+        }
+      } while (cursor !== "0");
+
+      console.log(`Cleared ${totalDeleted} path cache entries from Redis`);
+
+      // Also clear memory cache
+      this.pathCache.clear();
+      this.pathCacheExpiry.clear();
+
+      // IMPROVEMENT: Set a flag indicating path cache was recently cleared
+      await this.redis.set("pathCacheLastCleared", Date.now().toString(), {
+        ex: 60, // 1 minute expiry
+      });
     } catch (error) {
       console.error("Error clearing Redis path cache:", error);
+
+      // On error, at least clear memory cache
+      this.pathCache.clear();
+      this.pathCacheExpiry.clear();
+    }
+  }
+  public async invalidatePathsForToken(tokenAddress: string): Promise<void> {
+    try {
+      // Scan for paths that include this token
+      let cursor = "0";
+      const keysToDelete: string[] = [];
+
+      do {
+        const scanResult = await this.redis.scan(cursor, {
+          match: `path:${tokenAddress}-*`,
+          count: 100,
+        });
+
+        if (Array.isArray(scanResult) && scanResult.length >= 1) {
+          cursor = scanResult[0].toString();
+          const keys = scanResult[1] || [];
+          keysToDelete.push(...keys);
+        } else {
+          break;
+        }
+      } while (cursor !== "0");
+
+      // Also scan for paths where this token is the destination
+      cursor = "0";
+      do {
+        const scanResult = await this.redis.scan(cursor, {
+          match: `path:*-${tokenAddress}-*`,
+          count: 100,
+        });
+
+        if (Array.isArray(scanResult) && scanResult.length >= 1) {
+          cursor = scanResult[0].toString();
+          const keys = scanResult[1] || [];
+          keysToDelete.push(...keys);
+        } else {
+          break;
+        }
+      } while (cursor !== "0");
+
+      // Delete all found keys
+      if (keysToDelete.length > 0) {
+        for (let i = 0; i < keysToDelete.length; i += 100) {
+          const batch = keysToDelete.slice(i, i + 100);
+          await this.redis.del(...batch);
+        }
+        console.log(
+          `Invalidated ${keysToDelete.length} paths for token ${tokenAddress}`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `Error invalidating paths for token ${tokenAddress}:`,
+        error
+      );
     }
   }
 }

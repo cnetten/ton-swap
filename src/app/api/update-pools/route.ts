@@ -83,6 +83,36 @@ export async function GET(req: Request) {
     // Clear path cache to ensure fresh calculations
     await tracker.clearPathCache();
 
+    // OPTIMIZATION: After updating Redis, refresh the in-memory cache
+    // This ensures subsequent requests can use memory cache instead of Redis
+    console.log("Refreshing in-memory cache from Redis...");
+    try {
+      const [dedustPools, stonfiPools] = await Promise.all([
+        tracker.getPoolsFromChunks("dedust"),
+        tracker.getPoolsFromChunks("stonfi"),
+      ]);
+
+      // Update in-memory cache
+      tracker.redisCacheData.set("dedust", dedustPools);
+      tracker.redisCacheData.set("stonfi", stonfiPools);
+
+      console.log(
+        `In-memory cache refreshed - DeDust: ${dedustPools.length} pools, StonFi: ${stonfiPools.length} pools`
+      );
+
+      // Also prepare quick response data for even faster access
+      // This creates an optimized subset of data for immediate responses
+      await Promise.all([
+        tracker.storeQuickResponseData("dedust", dedustPools),
+        tracker.storeQuickResponseData("stonfi", stonfiPools),
+      ]);
+
+      console.log("Quick response data stored for both sources");
+    } catch (cacheError) {
+      console.error("Error refreshing in-memory cache:", cacheError);
+      // Non-fatal error, continue with response
+    }
+
     // Return success response
     return NextResponse.json(
       {
@@ -92,6 +122,9 @@ export async function GET(req: Request) {
         timestamp: Date.now(),
         type: isFullUpdate ? "full" : "fast",
         pathCacheCleared: true,
+        inMemoryCacheRefreshed:
+          tracker.redisCacheData.has("dedust") &&
+          tracker.redisCacheData.has("stonfi"),
       },
       {
         headers: {

@@ -385,31 +385,81 @@ export async function POST(req: Request) {
     const poolService = PoolService.getInstance();
     const tracker = poolService.getTracker();
 
-    // OPTIMIZATION: Check if we have a cached path first to avoid unnecessary work
-    // This is essential for performance in a serverless environment
-    const fromDecimals = 9; // Default to 9 if we don't know yet
+    // OPTIMIZATION: Use in-memory cache for faster token decimal lookups
+    let dedustPools = tracker.redisCacheData.get("dedust") || [];
+    let stonfiPools = tracker.redisCacheData.get("stonfi") || [];
+
+    // Combine pools for the initial decimals lookup
+    let allPools = [...dedustPools, ...stonfiPools];
+
+    // If memory cache is empty, quickly check if we have the "quick" data in Redis
+    if (allPools.length === 0) {
+      try {
+        const quickDedustData = await tracker.redis.get("quick:dedust");
+        const quickStonfiData = await tracker.redis.get("quick:stonfi");
+
+        if (quickDedustData) {
+          dedustPools = JSON.parse(
+            typeof quickDedustData === "string"
+              ? quickDedustData
+              : JSON.stringify(quickDedustData)
+          );
+          tracker.redisCacheData.set("dedust", dedustPools);
+        }
+
+        if (quickStonfiData) {
+          stonfiPools = JSON.parse(
+            typeof quickStonfiData === "string"
+              ? quickStonfiData
+              : JSON.stringify(quickStonfiData)
+          );
+          tracker.redisCacheData.set("stonfi", stonfiPools);
+        }
+
+        allPools = [...dedustPools, ...stonfiPools];
+      } catch (error) {
+        console.error("Error loading quick data from Redis:", error);
+      }
+    }
+
+    // If we still have no pools, fall back to full Redis load
+    if (allPools.length === 0) {
+      // Only load from Redis if memory cache is empty
+      [dedustPools, stonfiPools] = await Promise.all([
+        poolService.getPoolsBySource("dedust", true), // skipUpdate=true to avoid delays
+        poolService.getPoolsBySource("stonfi", true),
+      ]);
+
+      allPools = [...dedustPools, ...stonfiPools];
+    }
+
+    // Calculate amount with decimals for path finding
+    // Default to 9 decimals until we can determine the actual decimals
+    const fromDecimals = getTokenDecimals(actualFromAddress, allPools);
     const amountNumber = Number(amount);
     const amountInteger = Math.floor(amountNumber * 10 ** fromDecimals);
     const amountWithDecimals = BigInt(amountInteger).toString();
 
-    // Try to get cached path first
-    const cachedPath = await tracker.getPathFromCache(
-      actualFromAddress,
-      actualToAddress,
-      amountWithDecimals
-    );
+    // Try to get cached path if not forcing refresh
+    if (!forceRefresh) {
+      const cachedPath = await tracker.getPathFromCache(
+        actualFromAddress,
+        actualToAddress,
+        amountWithDecimals
+      );
 
-    if (cachedPath && !forceRefresh) {
-      console.log("Using cached path result");
-      const endTime = performance.now();
-      const requestTime = Math.round(endTime - startTime);
+      if (cachedPath) {
+        console.log("Using cached path result");
+        const endTime = performance.now();
+        const requestTime = Math.round(endTime - startTime);
 
-      // Add request time to the response
-      return NextResponse.json({
-        ...cachedPath,
-        requestTimeMs: requestTime,
-        fromCache: true,
-      });
+        // Add request time to the response
+        return NextResponse.json({
+          ...cachedPath,
+          requestTimeMs: requestTime,
+          fromCache: true,
+        });
+      }
     }
 
     // No cached result or force refresh requested - continue with normal flow
@@ -418,16 +468,15 @@ export async function POST(req: Request) {
       tracker.redisCacheData.clear();
       // Only perform update if explicitly requested
       await tracker.performFastUpdate();
+
+      // Reload pools after update
+      [dedustPools, stonfiPools] = await Promise.all([
+        poolService.getPoolsBySource("dedust", true),
+        poolService.getPoolsBySource("stonfi", true),
+      ]);
+
+      allPools = [...dedustPools, ...stonfiPools];
     }
-
-    // Always pass skipUpdate=true to avoid triggering updates during quote requests
-    const [dedustPools, stonfiPools] = await Promise.all([
-      poolService.getPoolsBySource("dedust", true),
-      poolService.getPoolsBySource("stonfi", true),
-    ]);
-
-    // Combine all pools for decimals lookup
-    const allPools = [...dedustPools, ...stonfiPools];
 
     // OPTIMIZATION: If we have fewer than 10 pools total, something is wrong
     // Try a fast update but don't wait for it to complete
@@ -439,7 +488,7 @@ export async function POST(req: Request) {
         .catch((err) => console.error("Background update error:", err));
     }
 
-    // Get fromDecimals before finding paths
+    // Get accurate fromDecimals based on available pools
     const actualFromDecimals = getTokenDecimals(actualFromAddress, allPools);
     const preciseAmountInteger = Math.floor(
       amountNumber * 10 ** actualFromDecimals

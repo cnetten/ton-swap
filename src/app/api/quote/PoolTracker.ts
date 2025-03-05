@@ -173,15 +173,96 @@ class PoolTracker extends EventEmitter {
         lastUpdateTimestamp: Date.now(),
       }));
 
-      // Store with a short TTL
-      await this.redis.set(`quick:${source}`, JSON.stringify(minimalPools), {
-        ex: 300,
-      });
-      console.log(
-        `Stored ${minimalPools.length} quick access pools for ${source}`
-      );
+      // Serialize the data
+      const jsonData = JSON.stringify(minimalPools);
+
+      // Check if the data exceeds Upstash's 1MB limit (use 900KB to be safe)
+      const MAX_REDIS_SIZE = 900000; // ~900KB
+
+      if (jsonData.length <= MAX_REDIS_SIZE) {
+        // If small enough, store directly with a short TTL
+        await this.redis.set(`quick:${source}`, jsonData, {
+          ex: 300,
+        });
+        console.log(
+          `Stored ${minimalPools.length} quick access pools for ${source}`
+        );
+      } else {
+        // If too large, store in chunks
+        console.log(
+          `Quick data for ${source} is ${(
+            jsonData.length /
+            1024 /
+            1024
+          ).toFixed(2)}MB, chunking...`
+        );
+
+        // Calculate how many chunks we need
+        const numChunks = Math.ceil(minimalPools.length / 200); // ~200 pools per chunk
+
+        // Store metadata
+        await this.redis.set(
+          `quick:${source}:meta`,
+          JSON.stringify({
+            totalPools: minimalPools.length,
+            chunks: numChunks,
+            timestamp: Date.now(),
+          }),
+          { ex: 300 }
+        );
+
+        // Store each chunk
+        for (let i = 0; i < numChunks; i++) {
+          const chunkStart = i * 200;
+          const chunkEnd = Math.min((i + 1) * 200, minimalPools.length);
+          const chunk = minimalPools.slice(chunkStart, chunkEnd);
+
+          await this.redis.set(
+            `quick:${source}:chunk:${i}`,
+            JSON.stringify(chunk),
+            {
+              ex: 300,
+            }
+          );
+        }
+
+        console.log(
+          `Stored ${minimalPools.length} quick access pools for ${source} in ${numChunks} chunks`
+        );
+      }
     } catch (error) {
       console.error(`Error storing quick response data for ${source}:`, error);
+
+      // If we failed due to size, try storing a more minimal version
+      if (error.toString().includes("max request size exceeded")) {
+        try {
+          console.log(
+            `Attempting to store ultra-minimal data for ${source}...`
+          );
+          // Create an ultra-minimal version with just essential data
+          const ultraMinimalPools = pools.slice(0, 1000).map((pool) => ({
+            address: pool.address,
+            reserves: pool.reserves,
+            source: pool.source,
+          }));
+
+          await this.redis.set(
+            `quick:${source}:minimal`,
+            JSON.stringify(ultraMinimalPools),
+            {
+              ex: 300,
+            }
+          );
+          console.log(
+            `Stored ${ultraMinimalPools.length} ultra-minimal pools for ${source}`
+          );
+        } catch (fallbackError) {
+          console.error(
+            `Failed to store even minimal data for ${source}:`,
+            fallbackError
+          );
+        }
+      }
     }
   }
 
@@ -514,7 +595,7 @@ class PoolTracker extends EventEmitter {
   }
 
   // Retrieves pools from chunks and reconstitutes them
-  private async getPoolsFromChunks(source: string): Promise<Pool[]> {
+  public async getPoolsFromChunks(source: string): Promise<Pool[]> {
     try {
       // Check if we have it in memory cache first
       if (this.redisCacheData.has(source)) {
@@ -1459,6 +1540,8 @@ class PoolTracker extends EventEmitter {
         return quickPools;
       }
     }
+
+    // OPTIMIZATION: Check in-memory cache next (higher priority than Redis chunks)
     if (this.redisCacheData.has(source)) {
       const cachedPools = this.redisCacheData.get(source)!;
       if (cachedPools.length > 0) {
@@ -1481,6 +1564,14 @@ class PoolTracker extends EventEmitter {
       // Get pools from chunks
       const pools = await this.getPoolsFromChunks(source);
       if (pools.length > 0) {
+        // Update in-memory cache with Redis data
+        this.redisCacheData.set(source, pools);
+
+        // OPTIMIZATION: Store quick response data for future requests
+        this.storeQuickResponseData(source, pools).catch((err) =>
+          console.error(`Error storing quick response data for ${source}:`, err)
+        );
+
         // OPTIMIZATION: Any pools with minimum structure are good enough for quotes
         return pools;
       }
@@ -1495,10 +1586,6 @@ class PoolTracker extends EventEmitter {
     console.log(`Falling back to API for ${source} pools...`);
     let apiPools: Pool[] = [];
 
-    // Store quick response data for future requests
-    if (apiPools.length > 0) {
-      await this.storeQuickResponseData(source, apiPools);
-    }
     if (source === "dedust") {
       try {
         const dedustPools = await this.dedustClient.getPools();
@@ -1560,6 +1647,11 @@ class PoolTracker extends EventEmitter {
       } catch (error) {
         console.error("Error fetching StonFi pools:", error);
       }
+    }
+
+    // Store quick response data for future requests
+    if (apiPools.length > 0) {
+      await this.storeQuickResponseData(source, apiPools);
     }
 
     // Store in Redis for future use

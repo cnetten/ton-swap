@@ -99,15 +99,6 @@ export async function GET(req: Request) {
       console.log(
         `In-memory cache refreshed - DeDust: ${dedustPools.length} pools, StonFi: ${stonfiPools.length} pools`
       );
-
-      // Also prepare quick response data for even faster access
-      // This creates an optimized subset of data for immediate responses
-      await Promise.all([
-        tracker.storeQuickResponseData("dedust", dedustPools),
-        tracker.storeQuickResponseData("stonfi", stonfiPools),
-      ]);
-
-      console.log("Quick response data stored for both sources");
     } catch (cacheError) {
       console.error("Error refreshing in-memory cache:", cacheError);
       // Non-fatal error, continue with response

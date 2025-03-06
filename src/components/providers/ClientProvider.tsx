@@ -20,7 +20,7 @@ export function ClientProvider({ children }: ClientProviderProps) {
 
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-      <TonConnectUIProvider manifestUrl="https://ton-swap-opal.vercel.app/tonconnect-manifest.json">
+      <TonConnectUIProvider manifestUrl="https://9addw9ij3t.us-east-2.awsapprunner.com/tonconnect-manifest.json">
         {children}
       </TonConnectUIProvider>
     </ThemeProvider>

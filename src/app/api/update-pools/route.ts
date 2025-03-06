@@ -1,125 +1,84 @@
+// api/keep-alive/route.ts
+// Ultra-lightweight endpoint just to keep container alive
+
 import { NextResponse } from "next/server";
 import { PoolService } from "../quote/PoolTracker";
 
-// Add dynamic directive for Vercel
+// Add dynamic directive for AWS App Runner
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // Maximum duration in seconds
 
 export async function GET(req: Request) {
   try {
-    // Get the URL to parse query parameters
-    const url = new URL(req.url);
-    const isFullUpdate = url.searchParams.get("type") === "full";
-    const forceUpdate = url.searchParams.get("force") === "true";
-
-    console.log(
-      `Starting ${isFullUpdate ? "full" : "fast"} update ${
-        forceUpdate ? "(forced)" : ""
-      }`
-    );
-
     // Get instance and ensure it's initialized
     const poolService = PoolService.getInstance();
     if (!poolService.isInitialized()) {
       await poolService.initialize();
-      console.log("PoolService initialized");
+      console.log("PoolService initialized from keep-alive");
     }
 
     const tracker = poolService.getTracker();
-    const redis = poolService.getRedis();
 
-    // Reset flags if they've been stuck or forced
+    // Get the URL to parse query parameters
+    const url = new URL(req.url);
+    const forceUpdate = url.searchParams.get("force") === "true";
+
+    // Only check for stuck processes if force=true
     if (forceUpdate) {
-      // Reset Redis flags instead of in-memory flags
-      await redis.del(`update:fast:inProgress`);
-      await redis.del(`update:fast:startTime`);
-      await redis.del(`update:full:inProgress`);
-      await redis.del(`update:full:startTime`);
-      console.log("Update flags reset due to force parameter");
-    }
+      const redis = poolService.getRedis();
 
-    // For Vercel, we need to be more aggressive about timeout handling
-    const updateTimeoutMs = 50000; // 50 seconds to allow for Vercel's 60s limit
+      // Check for stuck update flags
+      const updateTypes = ["fast", "full", "redis-persist"];
+      const stuckFlags = [];
 
-    // Create a promise that resolves when the update is complete or times out
-    const updateWithTimeout = async () => {
-      return new Promise(async (resolve, reject) => {
-        // Setup timeout
-        const timeout = setTimeout(() => {
-          console.error(`Update timed out after ${updateTimeoutMs / 1000}s`);
+      for (const type of updateTypes) {
+        const inProgressFlag = await redis.get(`update:${type}:inProgress`);
+        if (inProgressFlag === "true") {
+          const startTimeData = await redis.get(`update:${type}:startTime`);
+          const startTime = startTimeData
+            ? typeof startTimeData === "string"
+              ? parseInt(startTimeData)
+              : (startTimeData as number)
+            : 0;
+          const flagAge = Date.now() - startTime;
 
-          // Reset Redis flags on timeout
-          (async () => {
-            await redis.del(
-              `update:${isFullUpdate ? "full" : "fast"}:inProgress`
-            );
-            await redis.del(
-              `update:${isFullUpdate ? "full" : "fast"}:startTime`
-            );
-          })().catch((err) => console.error("Error resetting flags:", err));
-
-          reject(new Error("Update timed out"));
-        }, updateTimeoutMs);
-
-        try {
-          // Run the appropriate update
-          if (isFullUpdate) {
-            await tracker.performFullUpdate();
-          } else {
-            await tracker.performFastUpdate();
+          // If flag is older than 5 minutes, it's stuck
+          if (flagAge > 300000) {
+            stuckFlags.push(type);
+            // Reset this flag
+            await redis.del(`update:${type}:inProgress`);
+            await redis.del(`update:${type}:startTime`);
           }
-          clearTimeout(timeout);
-          resolve("Update completed successfully");
-        } catch (error) {
-          clearTimeout(timeout);
-          reject(error);
         }
-      });
-    };
+      }
 
-    // Execute the update
-    await updateWithTimeout();
+      if (stuckFlags.length > 0) {
+        console.log(`Reset stuck update flags: ${stuckFlags.join(", ")}`);
+      }
 
-    // Clear path cache to ensure fresh calculations
-    await tracker.clearPathCache();
-
-    // OPTIMIZATION: After updating Redis, refresh the in-memory cache
-    // This ensures subsequent requests can use memory cache instead of Redis
-    console.log("Refreshing in-memory cache from Redis...");
-    try {
-      const [dedustPools, stonfiPools] = await Promise.all([
-        tracker.getPoolsFromChunks("dedust"),
-        tracker.getPoolsFromChunks("stonfi"),
-      ]);
-
-      // Update in-memory cache
-      tracker.redisCacheData.set("dedust", dedustPools);
-      tracker.redisCacheData.set("stonfi", stonfiPools);
-
-      console.log(
-        `In-memory cache refreshed - DeDust: ${dedustPools.length} pools, StonFi: ${stonfiPools.length} pools`
-      );
-    } catch (cacheError) {
-      console.error("Error refreshing in-memory cache:", cacheError);
-      // Non-fatal error, continue with response
+      // Force a memory update if requested
+      tracker
+        .performMemoryOnlyUpdate()
+        .catch((err) => console.error("Error in forced memory update:", err));
     }
 
-    // Return success response
+    // Get basic pool counts without accessing Redis
+    const dedustPools = tracker.redisCacheData.get("dedust") || [];
+    const stonfiPools = tracker.redisCacheData.get("stonfi") || [];
+
+    // Ultra minimal response
     return NextResponse.json(
       {
-        message: `${
-          isFullUpdate ? "Full" : "Fast"
-        } pools update completed successfully`,
+        status: "alive",
         timestamp: Date.now(),
-        type: isFullUpdate ? "full" : "fast",
-        pathCacheCleared: true,
-        inMemoryCacheRefreshed:
-          tracker.redisCacheData.has("dedust") &&
-          tracker.redisCacheData.has("stonfi"),
+        poolCounts: {
+          dedust: dedustPools.length,
+          stonfi: stonfiPools.length,
+          total: dedustPools.length + stonfiPools.length,
+        },
       },
       {
         headers: {
-          // Prevent caching in Vercel edge network
+          // Prevent caching
           "Cache-Control": "no-store, max-age=0, must-revalidate",
           Pragma: "no-cache",
           Expires: "0",
@@ -127,26 +86,12 @@ export async function GET(req: Request) {
       }
     );
   } catch (error) {
-    console.error("Pool update error:", error);
+    console.error("Keep-alive error:", error);
 
-    // Reset flags to prevent deadlock on errors
-    const poolService = PoolService.getInstance();
-    const redis = poolService.getRedis();
-
-    // Reset Redis flags instead of in-memory flags
-    try {
-      await redis.del(`update:fast:inProgress`);
-      await redis.del(`update:fast:startTime`);
-      await redis.del(`update:full:inProgress`);
-      await redis.del(`update:full:startTime`);
-    } catch (redisError) {
-      console.error("Error resetting Redis flags:", redisError);
-    }
-
+    // Return minimal error response
     return NextResponse.json(
       {
-        message: "Failed to update pools",
-        error: error instanceof Error ? error.message : "Unknown error",
+        status: "error",
         timestamp: Date.now(),
       },
       {

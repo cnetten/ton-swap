@@ -496,7 +496,7 @@ export async function POST(req: Request) {
     const preciseAmountWithDecimals = BigInt(preciseAmountInteger).toString();
 
     // Convert slippageTolerance to decimal
-    const slippageDecimal = (slippageTolerance || 0.5) / 100;
+    const slippageDecimal = slippageTolerance || 0.005;
 
     // OPTIMIZATION: Use a timeout for the path finding to avoid long-running functions
     // This helps prevent Vercel function timeouts

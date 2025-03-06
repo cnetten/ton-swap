@@ -6,6 +6,7 @@ import { DeDustClient } from "@dedust/sdk";
 import { StonApiClient } from "@ston-fi/api";
 import { Redis } from "@upstash/redis";
 import { fetchWithRetry } from "./utils/utils";
+import { DEX } from "@ston-fi/sdk";
 
 // Pool data interfaces remain unchanged
 interface TokenMetadata {
@@ -34,6 +35,7 @@ interface Pool {
     volume: string[];
   };
   source?: string;
+  version?: string;
   lastUpdateTimestamp?: number;
   volatility?: number; // Added for tracking pool volatility
 }
@@ -123,6 +125,9 @@ class PoolTracker extends EventEmitter {
   // API clients for direct calls
   private dedustClient: DeDustClient;
   private stonfiClient: StonApiClient;
+
+  //Stonfi router addresses
+  private StonfiV1 = DEX.v1.Router.address;
 
   // Define for TypeScript
   public performFastUpdate: () => Promise<void>;
@@ -2695,7 +2700,8 @@ class PoolTracker extends EventEmitter {
   public filterPoolsByLiquidity(
     source: string,
     minReserve: number,
-    maxTradeFee: number
+    maxTradeFee: number,
+    sourceVersion?: string
   ): Pool[] {
     // Get pools from memory cache
     const pools = this.redisCacheData.get(source) || [];
@@ -2712,6 +2718,15 @@ class PoolTracker extends EventEmitter {
       if (!pool?.assets?.length || !pool?.reserves?.length || !pool?.stats) {
         return false;
       }
+
+      if (
+        source === "stonfi" &&
+        sourceVersion &&
+        pool.version !== sourceVersion
+      ) {
+        return false;
+      }
+
       let tradeFee = parseFloat(pool.tradeFee || "0");
 
       // Check trade fee
@@ -2838,6 +2853,8 @@ class PoolTracker extends EventEmitter {
       },
     ];
 
+    const stonfiVersion = stonfiPool.router === this.StonfiV1 ? "v1" : "v2";
+
     // Create Pool object
     return {
       address: stonfiPool.address,
@@ -2861,6 +2878,7 @@ class PoolTracker extends EventEmitter {
         ],
       },
       source: "stonfi",
+      version: stonfiVersion,
       lastUpdateTimestamp: Date.now(),
     };
   }

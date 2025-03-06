@@ -237,7 +237,8 @@ async function findBestPathsBySource(
   const filteredStonfiPools = tracker.filterPoolsByLiquidity(
     "stonfi",
     minLiquidity,
-    0.5
+    0.5,
+    "v1"
   );
 
   console.log(

@@ -88,18 +88,26 @@ export const SwapInterface = () => {
         slippageTolerance: "0.005",
       });
 
+      const hasValidPath =
+        simulation &&
+        simulation.swapPaths &&
+        Array.isArray(simulation.swapPaths) &&
+        simulation.swapPaths.length > 0;
+
       setState((prev) => ({
         ...prev,
-        rawSimulation: simulation,
-        toAmount: simulation?.swapPaths[0]?.estimatedOutput || "",
-        swapRoute: simulation?.swapPaths[0]?.pathReadable,
-        outPerIn: simulation?.swapPaths[0]?.outPerIn,
-        receiveAtLeast: simulation?.swapPaths[0]?.minimumAmountOut,
-        // priceImpact: simulation.priceImpact,
-        // minAskUnits: simulation.minAskUnits,
-        // feePercent: simulation.quote?.params?.swap?.routes[0]?.gasBudget,
-        // transaction: simulation.transaction,
-        protocol: simulation?.swapPaths[0]?.source,
+        rawSimulation: simulation || {},
+        toAmount: hasValidPath
+          ? simulation.swapPaths[0]?.estimatedOutput || ""
+          : "",
+        swapRoute: hasValidPath
+          ? simulation.swapPaths[0]?.pathReadable || ""
+          : "",
+        outPerIn: hasValidPath ? simulation.swapPaths[0]?.outPerIn || "0" : "0",
+        receiveAtLeast: hasValidPath
+          ? simulation.swapPaths[0]?.minimumAmountOut || "0"
+          : "0",
+        protocol: hasValidPath ? simulation.swapPaths[0]?.source || "" : "",
       }));
     } catch (error) {
       console.error("Failed to simulate swap:", error);
@@ -107,6 +115,9 @@ export const SwapInterface = () => {
         ...prev,
         toAmount: "",
         swapRoute: "",
+        outPerIn: "0",
+        receiveAtLeast: "0",
+        protocol: "",
       }));
     }
   }, 500);

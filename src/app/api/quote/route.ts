@@ -442,24 +442,47 @@ export async function POST(req: Request) {
     const amountWithDecimals = BigInt(amountInteger).toString();
 
     // Try to get cached path if not forcing refresh
+    // Try to get cached path if not forcing refresh
     if (!forceRefresh) {
-      const cachedPath = await tracker.getPathFromCache(
-        actualFromAddress,
-        actualToAddress,
-        amountWithDecimals
-      );
+      try {
+        // First check memory cache directly (fastest)
+        const memoryCacheKey = `${actualFromAddress}-${actualToAddress}-${amountWithDecimals}`;
+        let cachedPath = null;
 
-      if (cachedPath) {
-        console.log("Using cached path result");
-        const endTime = performance.now();
-        const requestTime = Math.round(endTime - startTime);
+        if (tracker.pathCache.has(memoryCacheKey)) {
+          const expiry = tracker.pathCacheExpiry.get(memoryCacheKey) || 0;
 
-        // Add request time to the response
-        return NextResponse.json({
-          ...cachedPath,
-          requestTimeMs: requestTime,
-          fromCache: true,
-        });
+          // Check if still valid
+          if (expiry > Date.now()) {
+            cachedPath = tracker.pathCache.get(memoryCacheKey);
+            console.log(`Memory cache hit for path ${memoryCacheKey}`);
+          }
+        }
+
+        // If not found in memory, try Redis
+        if (!cachedPath) {
+          cachedPath = await tracker.getPathFromCache(
+            actualFromAddress,
+            actualToAddress,
+            amountWithDecimals
+          );
+        }
+
+        if (cachedPath) {
+          console.log("Using cached path result");
+          const endTime = performance.now();
+          const requestTime = Math.round(endTime - startTime);
+
+          // Add request time to the response
+          return NextResponse.json({
+            ...cachedPath,
+            requestTimeMs: requestTime,
+            fromCache: true,
+          });
+        }
+      } catch (error) {
+        console.error("Error checking cache:", error);
+        // Continue with path finding even if cache check fails
       }
     }
 

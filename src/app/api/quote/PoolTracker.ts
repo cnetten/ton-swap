@@ -1157,6 +1157,10 @@ class PoolTracker extends EventEmitter {
         };
       };
 
+      // IMPORTANT: Keep reference to old pools
+      const oldDedustPools = this.redisCacheData.get("dedust") || [];
+      const oldStonfiPools = this.redisCacheData.get("stonfi") || [];
+
       // Use shorter timeouts for faster response (2 seconds instead of normal 10)
       const dedustPromise = Promise.race([
         this.dedustClient.getPools().catch((err) => {
@@ -1172,7 +1176,7 @@ class PoolTracker extends EventEmitter {
       ]);
 
       const stonfiPromise = Promise.race([
-        this.stonfiClient.getPools({ dexV2: false }).catch((err) => {
+        this.stonfiClient.getPools().catch((err) => {
           console.error("[Memory-Only] Error fetching StonFi pools:", err);
           return [];
         }),
@@ -1295,12 +1299,20 @@ class PoolTracker extends EventEmitter {
           }
         }
 
-        // Update in-memory cache with new data
-        this.redisCacheData.set("dedust", Array.from(poolMap.values()));
-
-        if (changesCount > 0) {
+        // IMPORTANT: Only update in-memory cache with new data if we have enough pools
+        // If the update returned almost no pools, something is wrong - keep old data
+        const updatedPoolsArray = Array.from(poolMap.values());
+        if (
+          updatedPoolsArray.length >= oldDedustPools.length * 0.5 ||
+          updatedPoolsArray.length > 20
+        ) {
+          this.redisCacheData.set("dedust", updatedPoolsArray);
           console.log(
-            `[Memory-Only] Updated DeDust in-memory cache: ${changesCount} changes, ${significantChanges} significant`
+            `[Memory-Only] Updated DeDust in-memory cache: ${updatedPoolsArray.length} pools (${changesCount} changes, ${significantChanges} significant)`
+          );
+        } else {
+          console.warn(
+            `[Memory-Only] Retrieved only ${updatedPoolsArray.length} DeDust pools, keeping old data with ${oldDedustPools.length} pools`
           );
         }
 
@@ -1308,6 +1320,10 @@ class PoolTracker extends EventEmitter {
         if (significantChanges >= 3) {
           significantChangesDetected = true;
         }
+      } else {
+        console.warn(
+          "[Memory-Only] No DeDust pools retrieved, keeping old data"
+        );
       }
 
       // Process StonFi pools
@@ -1424,12 +1440,20 @@ class PoolTracker extends EventEmitter {
           }
         }
 
-        // Update in-memory cache with new data
-        this.redisCacheData.set("stonfi", Array.from(poolMap.values()));
-
-        if (changesCount > 0) {
+        // IMPORTANT: Only update in-memory cache with new data if we have enough pools
+        // If the update returned almost no pools, something is wrong - keep old data
+        const updatedPoolsArray = Array.from(poolMap.values());
+        if (
+          updatedPoolsArray.length >= oldStonfiPools.length * 0.5 ||
+          updatedPoolsArray.length > 20
+        ) {
+          this.redisCacheData.set("stonfi", updatedPoolsArray);
           console.log(
-            `[Memory-Only] Updated StonFi in-memory cache: ${changesCount} changes, ${significantChanges} significant`
+            `[Memory-Only] Updated StonFi in-memory cache: ${updatedPoolsArray.length} pools (${changesCount} changes, ${significantChanges} significant)`
+          );
+        } else {
+          console.warn(
+            `[Memory-Only] Retrieved only ${updatedPoolsArray.length} StonFi pools, keeping old data with ${oldStonfiPools.length} pools`
           );
         }
 
@@ -1437,6 +1461,10 @@ class PoolTracker extends EventEmitter {
         if (significantChanges >= 3) {
           significantChangesDetected = true;
         }
+      } else {
+        console.warn(
+          "[Memory-Only] No StonFi pools retrieved, keeping old data"
+        );
       }
 
       // Update hot pools cache with memory-only updates
@@ -1471,22 +1499,23 @@ class PoolTracker extends EventEmitter {
       console.log(`[Memory-Only] Update completed in ${updateDuration}ms`);
     } catch (error) {
       console.error("[Memory-Only] Update error:", error);
+      // IMPORTANT: Even if the entire update fails, we don't clear the memory cache
+      // The existing data will be preserved
     }
   }
 
   private invalidateMemoryPathsForTokens(tokens: Set<string>): void {
     try {
       const invalidatedKeys: string[] = [];
+      const totalKeys = this.pathCache.size;
 
-      // Check each path in memory cache
+      // Only invalidate paths directly involving changed tokens
       for (const [key, _] of this.pathCache) {
-        // Parse key format: "fromAddress-toAddress-amount"
         const parts = key.split("-");
         if (parts.length >= 2) {
           const fromAddress = parts[0];
           const toAddress = parts[1];
 
-          // If path involves any of the changed tokens, invalidate it
           if (tokens.has(fromAddress) || tokens.has(toAddress)) {
             this.pathCache.delete(key);
             this.pathCacheExpiry.delete(key);
@@ -1497,11 +1526,12 @@ class PoolTracker extends EventEmitter {
 
       if (invalidatedKeys.length > 0) {
         console.log(
-          `[Memory-Only] Invalidated ${invalidatedKeys.length} paths in memory cache`
+          `[Memory-Only] Invalidated ${invalidatedKeys.length}/${totalKeys} paths in memory cache due to token updates`
         );
       }
     } catch (error) {
       console.error("[Memory-Only] Error invalidating memory paths:", error);
+      // Don't clear everything on error
     }
   }
 
@@ -2422,6 +2452,12 @@ class PoolTracker extends EventEmitter {
     performFastUpdate().catch((err) =>
       console.error("Initial fast update failed:", err)
     );
+
+    // Set up memory update interval - ensure we clear any existing one first
+    if (this.memoryUpdateInterval) {
+      clearInterval(this.memoryUpdateInterval);
+    }
+
     this.memoryUpdateInterval = setInterval(() => {
       this.performMemoryOnlyUpdate().catch((err) =>
         console.error("Error in memory-only update:", err)
@@ -2429,6 +2465,10 @@ class PoolTracker extends EventEmitter {
     }, this.MEMORY_UPDATE_SECONDS * 1000);
 
     // NEW: Set up interval for Redis persistence (5 minutes)
+    if (this.redisPersistInterval) {
+      clearInterval(this.redisPersistInterval);
+    }
+
     this.redisPersistInterval = setInterval(() => {
       this.performRedisPersistence().catch((err) =>
         console.error("Error in Redis persistence:", err)
@@ -2439,7 +2479,10 @@ class PoolTracker extends EventEmitter {
     this.performMemoryOnlyUpdate().catch((err) =>
       console.error("Initial memory update failed:", err)
     );
-    console.log("Pool tracking initialized successfully");
+
+    console.log(
+      `Pool tracking initialized with ${this.MEMORY_UPDATE_SECONDS}-second memory refresh interval`
+    );
   }
 
   private async performRedisPersistence(): Promise<void> {

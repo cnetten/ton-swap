@@ -27,12 +27,22 @@ function calculateSwapOutput(inputAmount, pool, inputTokenId, outputTokenId) {
       (asset) => (asset.address || asset.type) === outputTokenId
     );
 
-    if (inputTokenIndex === -1 || outputTokenIndex === -1) return "0";
+    if (inputTokenIndex === -1 || outputTokenIndex === -1) {
+      console.log(
+        `Token not found in pool: input=${inputTokenId}, output=${outputTokenId}`
+      );
+      return "0";
+    }
 
     const inputReserve = pool.reserves[inputTokenIndex];
     const outputReserve = pool.reserves[outputTokenIndex];
 
-    if (!inputReserve || !outputReserve) return "0";
+    if (!inputReserve || !outputReserve) {
+      console.log(
+        `Invalid reserves in pool: input=${inputReserve}, output=${outputReserve}`
+      );
+      return "0";
+    }
 
     // Get token decimals
     const inputDecimals = pool.assets[inputTokenIndex].metadata?.decimals || 9;
@@ -157,12 +167,37 @@ function getSymbolFromPool(tokenId, pool) {
 }
 
 function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
+  console.log(`Checking direct path from ${fromToken} to ${toToken}`);
+
+  // Skip if graph or tokens are invalid
+  if (!graph || !fromToken || !toToken) {
+    console.log(`Direct path check: Invalid parameters`);
+    return null;
+  }
+
+  // Check if tokens exist in graph
+  if (!graph[fromToken]) {
+    console.log(`Direct path check: From token ${fromToken} not in graph`);
+    return null;
+  }
+
+  // Skip if no direct connection
+  if (!graph[fromToken][toToken]) {
+    console.log(
+      `Direct path check: No direct connection from ${fromToken} to ${toToken}`
+    );
+    return null;
+  }
+
   const pairKey =
     fromToken < toToken ? `${fromToken}-${toToken}` : `${toToken}-${fromToken}`;
 
   const directPool = poolsByPair[pairKey];
 
-  if (!directPool) return null;
+  if (!directPool) {
+    console.log(`Direct path check: No pool found for pair ${pairKey}`);
+    return null;
+  }
 
   // Validate pool has sufficient reserves
   const inputTokenIndex = directPool.assets.findIndex(
@@ -172,12 +207,18 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
     (asset) => (asset.address || asset.type) === toToken
   );
 
-  if (inputTokenIndex === -1 || outputTokenIndex === -1) return null;
+  if (inputTokenIndex === -1 || outputTokenIndex === -1) {
+    console.log(`Direct path check: Token indices not found in pool assets`);
+    return null;
+  }
 
   const inputReserve = directPool.reserves[inputTokenIndex];
   const outputReserve = directPool.reserves[outputTokenIndex];
 
-  if (!inputReserve || !outputReserve) return null;
+  if (!inputReserve || !outputReserve) {
+    console.log(`Direct path check: Invalid reserves in pool`);
+    return null;
+  }
 
   // Calculate output amount
   const outputAmount = calculateSwapOutput(
@@ -187,18 +228,24 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
     toToken
   );
 
-  if (outputAmount === "0") return null;
+  if (outputAmount === "0") {
+    console.log(`Direct path check: Calculated output amount is zero`);
+    return null;
+  }
 
   // Create readable path
   const fromSymbol = getSymbolFromPool(fromToken, directPool);
   const toSymbol = getSymbolFromPool(toToken, directPool);
+
+  console.log(
+    `Direct path check: Found valid path with output ${outputAmount}`
+  );
 
   return {
     path: [fromToken, toToken],
     pathReadable: `${fromSymbol} → ${toSymbol}`,
     pools: [directPool],
     outputAmount,
-    // FIX: Don't use formatPrice for estimatedOutput, the raw amount will be formatted in route.ts
     estimatedOutput: outputAmount,
     inputAmount: inputAmount,
     minimumAmountOut: Number(outputAmount) * 0.995, // 0.5% slippage
@@ -286,8 +333,6 @@ function findPathsFromNode(
 
     if (outputAmount === "0" || outputAmount.startsWith("-")) continue;
 
-    if (outputAmount === "0") continue;
-
     visited.add(nextNode);
     currentPath.push(nextNode);
     currentPools.push(pool);
@@ -338,11 +383,26 @@ function findPathsFromNode(
     }
   }
 
+  // Additional logging for empty paths
+  if (allPaths.length === 0) {
+    console.log(
+      `No paths found from ${from} to ${targetNode}. Visited ${visited.size} nodes.`
+    );
+
+    // Check direct connection
+    if (graph[from] && graph[from][targetNode]) {
+      console.log(
+        `Direct connection exists from ${from} to ${targetNode}, but swap calculation failed.`
+      );
+    }
+  }
+
   return allPaths;
 }
 
+// This is where the main execution code starts
 if (parentPort) {
-  const allPaths = [];
+  // First check for direct path - this is important to try first
   const directPath = findDirectPath(
     workerData.graph,
     workerData.poolsByPair,
@@ -351,6 +411,8 @@ if (parentPort) {
     workerData.inputAmount
   );
 
+  // Then find multi-hop paths
+  const allPaths = [];
   if (directPath) {
     allPaths.push(directPath);
   }
@@ -380,11 +442,31 @@ if (parentPort) {
     return outputDiff;
   });
 
+  // Filter out negative or zero output paths
   const validPaths = allPaths.filter(
     (path) =>
       !path.outputAmount.startsWith("-") && BigInt(path.outputAmount) > 0n
   );
 
-  const bestPaths = validPaths.length > 0 ? validPaths.slice(0, 1) : [];
+  // IMPORTANT: If no multi-hop paths were found, but we have a direct path, use it
+  let bestPaths;
+  if (validPaths.length > 0) {
+    // We found valid paths through normal means
+    bestPaths = validPaths.slice(0, 1);
+    console.log(`Found ${validPaths.length} valid paths, using best path`);
+  } else if (
+    directPath &&
+    !directPath.outputAmount.startsWith("-") &&
+    BigInt(directPath.outputAmount) > 0n
+  ) {
+    // No multi-hop paths but we have a valid direct path as fallback
+    bestPaths = [directPath];
+    console.log(`No multi-hop paths found, falling back to direct path`);
+  } else {
+    // No valid paths found at all
+    bestPaths = [];
+    console.log(`No valid paths found`);
+  }
+
   parentPort.postMessage({ paths: bestPaths });
 }

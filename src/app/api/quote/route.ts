@@ -510,7 +510,7 @@ export async function POST(req: Request) {
 
     // Set a reasonable timeout for path finding (8 seconds)
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("Path finding timed out")), 8000);
+      setTimeout(() => reject(new Error("Path finding timed out")), 20000);
     });
 
     // Race between path finding and timeout

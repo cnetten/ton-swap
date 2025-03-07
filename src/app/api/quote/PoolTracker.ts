@@ -1172,7 +1172,7 @@ class PoolTracker extends EventEmitter {
       ]);
 
       const stonfiPromise = Promise.race([
-        this.stonfiClient.getPools().catch((err) => {
+        this.stonfiClient.getPools({ dexV2: false }).catch((err) => {
           console.error("[Memory-Only] Error fetching StonFi pools:", err);
           return [];
         }),
@@ -3199,7 +3199,7 @@ class PoolService {
     try {
       // Set a timeout to prevent hanging
       const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Initialize timed out")), 8000)
+        setTimeout(() => reject(new Error("Initialize timed out")), 20000)
       );
 
       // Race between initialization and timeout

@@ -153,75 +153,24 @@ async function findBestPathsBySource(
   const poolService = PoolService.getInstance();
   const tracker = poolService.getTracker();
 
-  // OPTIMIZATION: Check cache first with faster validation
-  const cacheKey = `path:${fromAddress}-${toAddress}-${amountWithDecimals}`;
-  const cachedData = await tracker.redis.get(cacheKey);
-
-  if (cachedData) {
-    try {
-      // Parse cached result
-      const cachedResult =
-        typeof cachedData === "string" ? JSON.parse(cachedData) : cachedData;
-
-      // Check if the cached result has a timestamp
-      const pathCacheTime = cachedResult.timestamp || 0;
-      const now = Date.now();
-      const cacheAge = now - pathCacheTime;
-
-      // If cache is recent (less than 30 seconds), use it without further checks
-      if (cacheAge < 30000) {
-        console.log(`Using recent cached path result (${cacheAge}ms old)`);
-        return cachedResult;
-      }
-
-      // For older cache, verify against pool updates
-      const [lastDedustUpdate, lastStonfiUpdate] = await Promise.all([
-        tracker.redis.get(`lastUpdate:dedust`),
-        tracker.redis.get(`lastUpdate:stonfi`),
-      ]);
-
-      // Parse timestamps for comparison
-      const dedustTimestamp = parseRedisTimestamp(lastDedustUpdate);
-      const stonfiTimestamp = parseRedisTimestamp(lastStonfiUpdate);
-
-      // Get the most recent update time
-      const latestUpdateTime = Math.max(dedustTimestamp, stonfiTimestamp);
-
-      // Only use cache if it's newer than the last pool update
-      if (pathCacheTime > latestUpdateTime) {
-        console.log(
-          `Using validated cached path (cache: ${new Date(
-            pathCacheTime
-          ).toISOString()}, last update: ${new Date(
-            latestUpdateTime
-          ).toISOString()})`
-        );
-        return cachedResult;
-      }
-
-      console.log(
-        `Cache invalidated - cache time: ${new Date(
-          pathCacheTime
-        ).toISOString()}, latest update: ${new Date(
-          latestUpdateTime
-        ).toISOString()}`
-      );
-    } catch (error) {
-      console.error(`Error parsing cached result:`, error);
-      // Continue if parsing fails
-    }
-  }
-
-  console.log("Fetching pools from all sources...");
-
-  // Get pools from different sources - use skipUpdate=true to avoid delays
-  const [dedustPools, stonfiPools] = await Promise.all([
-    poolService.getPoolsBySource("dedust", true),
-    poolService.getPoolsBySource("stonfi", true),
-  ]);
+  // Directly use in-memory cache first
+  let dedustPools = tracker.redisCacheData.get("dedust") || [];
+  let stonfiPools = tracker.redisCacheData.get("stonfi") || [];
 
   console.log(
-    `Found ${dedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
+    `Found ${dedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools from memory cache`
+  );
+
+  // If memory cache is empty, fall back to getPoolsBySource
+  if (dedustPools.length === 0 || stonfiPools.length === 0) {
+    [dedustPools, stonfiPools] = await Promise.all([
+      poolService.getPoolsBySource("dedust", true),
+      poolService.getPoolsBySource("stonfi", true),
+    ]);
+  }
+
+  console.log(
+    `After fallback: ${dedustPools.length} DeDust pools and ${stonfiPools.length} StonFi pools`
   );
 
   // Process pools by source - use a lower minimum liquidity for more options
@@ -237,8 +186,7 @@ async function findBestPathsBySource(
   const filteredStonfiPools = tracker.filterPoolsByLiquidity(
     "stonfi",
     minLiquidity,
-    0.5,
-    "v1"
+    0.5
   );
 
   console.log(
@@ -289,18 +237,16 @@ async function findBestPathsBySource(
         : toAddress;
 
     console.log("Finding swap paths for StonFi pools...");
-    // const stonfiPaths = await findSwapPathsParallel(
-    //   stonfiGraph,
-    //   stonfiPoolsByPair,
-    //   stonFiFromAdress,
-    //   stonFiToAddress,
-    //   amountWithDecimals,
-    //   4, // maxDepth
-    //   1, // maxPaths
-    //   "stonfi"
-    // );
-
-    const stonfiPaths = [];
+    const stonfiPaths = await findSwapPathsParallel(
+      stonfiGraph,
+      stonfiPoolsByPair,
+      stonFiFromAdress,
+      stonFiToAddress,
+      amountWithDecimals,
+      4, // maxDepth
+      1, // maxPaths
+      "stonfi"
+    );
 
     if (stonfiPaths.length > 0) {
       bestStonfiPath = { ...stonfiPaths[0], source: "stonfi" };
@@ -397,7 +343,7 @@ export async function POST(req: Request) {
     if (allPools.length === 0) {
       try {
         const quickDedustData = await tracker.redis.get("quick:dedust");
-        const quickStonfiData = await tracker.redis.get("quick:stonfi");
+        // Don't use quick data for StonFi to ensure we get all pools
 
         if (quickDedustData) {
           dedustPools = JSON.parse(
@@ -408,18 +354,20 @@ export async function POST(req: Request) {
           tracker.redisCacheData.set("dedust", dedustPools);
         }
 
-        if (quickStonfiData) {
-          stonfiPools = JSON.parse(
-            typeof quickStonfiData === "string"
-              ? quickStonfiData
-              : JSON.stringify(quickStonfiData)
-          );
+        // Always get full StonFi pools
+        const fullStonfiPools = await poolService.getPoolsBySource(
+          "stonfi",
+          false
+        );
+        if (fullStonfiPools && fullStonfiPools.length > 0) {
+          stonfiPools = fullStonfiPools;
           tracker.redisCacheData.set("stonfi", stonfiPools);
+          console.log(`Loaded ${stonfiPools.length} full StonFi pools`);
         }
 
         allPools = [...dedustPools, ...stonfiPools];
       } catch (error) {
-        console.error("Error loading quick data from Redis:", error);
+        console.error("Error loading pool data:", error);
       }
     }
 

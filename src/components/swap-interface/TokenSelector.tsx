@@ -32,7 +32,7 @@ export const TokenSelector: React.FC<TokenSelectorProps> = ({
 
         const searchedAssets = await client.searchAssets({
           searchString: "",
-          condition: `${AssetTag.LiquidityVeryHigh} | ${AssetTag.LiquidityHigh} | ${AssetTag.Popular}`,
+          condition: `${AssetTag.LiquidityHigh} | ${AssetTag.Popular}`,
           walletAddress: walletAddress,
         });
 

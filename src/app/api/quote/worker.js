@@ -61,10 +61,22 @@ function calculateSwapOutput(inputAmount, pool, inputTokenId, outputTokenId) {
 
       // Apply fee
       let feeBPS;
-      if (pool.source === "stonfi" && parseFloat(pool.tradeFee) > 1) {
-        feeBPS = BigInt(parseFloat(pool.tradeFee));
-      } else {
-        feeBPS = BigInt(Math.floor(parseFloat(pool.tradeFee) * 100));
+      if (pool.source === "stonfi") {
+        // FIX: StonFi fees are in basis points directly (20 = 0.2%)
+        const rawFee = parseFloat(pool.tradeFee);
+        if (rawFee > 1) {
+          // Fee is already in basis points (e.g., 20 for 0.2%)
+          feeBPS = BigInt(Math.floor(rawFee));
+        } else {
+          // Fee is in percentage (e.g., 0.2 for 0.2%)
+          feeBPS = BigInt(Math.floor(rawFee * 100));
+        }
+
+        // IMPORTANT FIX: Cap StonFi fee to reasonable values
+        if (feeBPS > BigInt(100)) {
+          console.log(`Capping suspiciously high StonFi fee: ${feeBPS} -> 30`);
+          feeBPS = BigInt(30); // Cap at 0.3%
+        }
       }
 
       const inputWithFee = (inputAmountBN * (10000n - feeBPS)) / 10000n;
@@ -167,25 +179,18 @@ function getSymbolFromPool(tokenId, pool) {
 }
 
 function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
-  console.log(`Checking direct path from ${fromToken} to ${toToken}`);
-
   // Skip if graph or tokens are invalid
   if (!graph || !fromToken || !toToken) {
-    console.log(`Direct path check: Invalid parameters`);
     return null;
   }
 
   // Check if tokens exist in graph
   if (!graph[fromToken]) {
-    console.log(`Direct path check: From token ${fromToken} not in graph`);
     return null;
   }
 
   // Skip if no direct connection
   if (!graph[fromToken][toToken]) {
-    console.log(
-      `Direct path check: No direct connection from ${fromToken} to ${toToken}`
-    );
     return null;
   }
 
@@ -195,7 +200,6 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
   const directPool = poolsByPair[pairKey];
 
   if (!directPool) {
-    console.log(`Direct path check: No pool found for pair ${pairKey}`);
     return null;
   }
 
@@ -208,7 +212,6 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
   );
 
   if (inputTokenIndex === -1 || outputTokenIndex === -1) {
-    console.log(`Direct path check: Token indices not found in pool assets`);
     return null;
   }
 
@@ -216,7 +219,6 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
   const outputReserve = directPool.reserves[outputTokenIndex];
 
   if (!inputReserve || !outputReserve) {
-    console.log(`Direct path check: Invalid reserves in pool`);
     return null;
   }
 
@@ -229,17 +231,12 @@ function findDirectPath(graph, poolsByPair, fromToken, toToken, inputAmount) {
   );
 
   if (outputAmount === "0") {
-    console.log(`Direct path check: Calculated output amount is zero`);
     return null;
   }
 
   // Create readable path
   const fromSymbol = getSymbolFromPool(fromToken, directPool);
   const toSymbol = getSymbolFromPool(toToken, directPool);
-
-  console.log(
-    `Direct path check: Found valid path with output ${outputAmount}`
-  );
 
   return {
     path: [fromToken, toToken],
@@ -380,20 +377,6 @@ function findPathsFromNode(
       currentPath.pop();
       currentPools.pop();
       visited.delete(nextNode);
-    }
-  }
-
-  // Additional logging for empty paths
-  if (allPaths.length === 0) {
-    console.log(
-      `No paths found from ${from} to ${targetNode}. Visited ${visited.size} nodes.`
-    );
-
-    // Check direct connection
-    if (graph[from] && graph[from][targetNode]) {
-      console.log(
-        `Direct connection exists from ${from} to ${targetNode}, but swap calculation failed.`
-      );
     }
   }
 

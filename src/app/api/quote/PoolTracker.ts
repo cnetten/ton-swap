@@ -3,7 +3,7 @@
 import { TonClient4, Address } from "@ton/ton";
 import { EventEmitter } from "events";
 import { DeDustClient } from "@dedust/sdk";
-import { StonApiClient } from "@ston-fi/api";
+import { AssetTag, StonApiClient } from "@ston-fi/api";
 import { Redis } from "@upstash/redis";
 import { fetchWithRetry } from "./utils/utils";
 import { DEX } from "@ston-fi/sdk";
@@ -128,6 +128,7 @@ class PoolTracker extends EventEmitter {
 
   //Stonfi router addresses
   private StonfiV1 = DEX.v1.Router.address;
+  private stonfiAssetsCache: Map<string, TokenMetadata> = new Map();
 
   // Define for TypeScript
   public performFastUpdate: () => Promise<void>;
@@ -156,6 +157,7 @@ class PoolTracker extends EventEmitter {
       endpointUrl: "https://api.dedust.io",
     });
     this.stonfiClient = new StonApiClient();
+    this.loadStonfiAssetsFromRedis().catch(console.error);
 
     // Initialize these methods with no-ops, they'll be properly defined in startTracking
     this.performFastUpdate = async () => {};
@@ -369,21 +371,24 @@ class PoolTracker extends EventEmitter {
   ): Promise<void> {
     try {
       // OPTIMIZATION: Create smaller, optimized version focused on essential data
-      const minimalPools = pools.map((pool) => ({
-        address: pool.address,
-        reserves: pool.reserves,
-        assets: pool.assets.map((asset) => ({
-          type: asset.type,
-          address: asset.address,
-          metadata: {
-            decimals: asset.metadata.decimals,
-            symbol: asset.metadata.symbol,
-          },
-        })),
-        tradeFee: pool.tradeFee,
-        source: pool.source,
-        lastUpdateTimestamp: Date.now(),
-      }));
+      const minimalPools =
+        source === "stonfi"
+          ? pools
+          : pools.map((pool) => ({
+              address: pool.address,
+              reserves: pool.reserves,
+              assets: pool.assets.map((asset) => ({
+                type: asset.type,
+                address: asset.address,
+                metadata: {
+                  decimals: asset.metadata.decimals,
+                  symbol: asset.metadata.symbol,
+                },
+              })),
+              tradeFee: pool.tradeFee,
+              source: pool.source,
+              lastUpdateTimestamp: Date.now(),
+            }));
 
       // Serialize the data
       const jsonData = JSON.stringify(minimalPools);
@@ -1338,36 +1343,22 @@ class PoolTracker extends EventEmitter {
         }
 
         // Process non-deprecated pools with all required Pool properties
-        const stonfiPools = stonfiResponse
-          .filter((pool) => !pool.deprecated)
-          .map((pool) => {
-            // Get existing pool for this address if any
-            const existingPool = poolMap.get(pool.address);
-
-            return {
-              address: pool.address,
-              reserves: [pool.reserve0, pool.reserve1],
-              source: "stonfi",
-              lastUpdateTimestamp: now,
-              // Use existing asset data if available, otherwise provide empty array
-              assets: existingPool?.assets || [],
-              // Include all required properties
-              tradeFee: pool.lpFee || existingPool?.tradeFee || "0",
-              type: "stonfi",
-              lt: existingPool?.lt || "0",
-              totalSupply:
-                pool.lpTotalSupply || existingPool?.totalSupply || "0",
-              lastPrice: existingPool?.lastPrice || { value: "0" },
-              stats: existingPool?.stats || {
-                fees: [
-                  pool.collectedToken0ProtocolFee || "0",
-                  pool.collectedToken1ProtocolFee || "0",
-                ],
-                volume: [pool.token0Balance || "0", pool.token1Balance || "0"],
-              },
-            } as Pool;
-          });
-
+        const stonfiPools = await Promise.all(
+          stonfiResponse
+            .filter((pool) => !pool.deprecated)
+            .map(async (pool) => {
+              try {
+                const convertedPool = await this.convertStonFiPool(pool);
+                return convertedPool;
+              } catch (err) {
+                console.error(
+                  `Error converting StonFi pool ${pool.address}:`,
+                  err
+                );
+                return null;
+              }
+            })
+        );
         // Check for changes and update memory cache
         let changesCount = 0;
         let significantChanges = 0;
@@ -2106,6 +2097,12 @@ class PoolTracker extends EventEmitter {
       return;
     }
 
+    await this.loadStonfiAssetsFromRedis();
+
+    if (this.stonfiAssetsCache.size === 0) {
+      await this.initializeStonFiAssets();
+    }
+
     this.isTracking = true;
 
     // Define fast update function for real-time data with debounce logic
@@ -2528,8 +2525,8 @@ class PoolTracker extends EventEmitter {
       await pipeline.exec();
 
       // Store a quick access version too
-      await this.storeQuickResponseData("dedust", dedustPools.slice(0, 500));
-      await this.storeQuickResponseData("stonfi", stonfiPools.slice(0, 500));
+      await this.storeQuickResponseData("dedust", dedustPools);
+      await this.storeQuickResponseData("stonfi", stonfiPools);
 
       console.log(`[Redis-Persist] Completed in ${Date.now() - now}ms`);
     } catch (error) {
@@ -2772,7 +2769,6 @@ class PoolTracker extends EventEmitter {
 
       let tradeFee = parseFloat(pool.tradeFee || "0");
 
-      // Check trade fee
       if (pool.source === "stonfi" && tradeFee > 1) {
         tradeFee = tradeFee / 100;
       }
@@ -2807,6 +2803,12 @@ class PoolTracker extends EventEmitter {
         ) {
           return false;
         }
+        const ratio =
+          Math.max(reserve1, reserve2) / Math.min(reserve1, reserve2);
+        // Filter out extremely imbalanced pools
+        if (ratio > 500) {
+          return false;
+        }
       } catch {
         return false;
       }
@@ -2824,6 +2826,172 @@ class PoolTracker extends EventEmitter {
       return true;
     });
   }
+  private async initializeStonFiAssets(): Promise<void> {
+    try {
+      console.log("Initializing StonFi assets cache...");
+
+      // Try to load from Redis first
+      const cachedData = await this.loadStonfiAssetsFromRedis();
+
+      if (cachedData && cachedData.size > 0) {
+        console.log(`Loaded ${cachedData.size} StonFi assets from Redis cache`);
+        this.stonfiAssetsCache = cachedData;
+        return;
+      }
+
+      // If no cached data, fetch from API
+      console.log("No cached StonFi assets found, fetching from API...");
+      const client = new StonApiClient();
+
+      // Get all assets with high liquidity
+      const assets = await client.searchAssets({
+        searchString: "",
+        condition: `${AssetTag.LiquidityHigh} | ${AssetTag.Popular}`,
+      });
+
+      // Populate cache
+      for (const asset of assets) {
+        if (asset?.contractAddress) {
+          this.stonfiAssetsCache.set(asset.contractAddress, asset as any);
+        }
+      }
+
+      console.log(`Fetched ${this.stonfiAssetsCache.size} StonFi assets`);
+
+      // Store in Redis with chunking to avoid size limits
+      await this.storeStonfiAssetsInRedisChunks();
+    } catch (error) {
+      console.error("Error initializing StonFi assets:", error);
+    }
+  }
+
+  private async storeStonfiAssetsInRedisChunks(): Promise<void> {
+    try {
+      const entries = Array.from(this.stonfiAssetsCache.entries());
+
+      // No assets to store
+      if (entries.length === 0) return;
+
+      // Store metadata about chunks
+      const CHUNK_SIZE = 50; // Number of assets per chunk
+      const numChunks = Math.ceil(entries.length / CHUNK_SIZE);
+
+      await this.redis.set(
+        "stonfi:assets:meta",
+        JSON.stringify({
+          totalAssets: entries.length,
+          chunks: numChunks,
+          timestamp: Date.now(),
+        }),
+        { ex: 86400 } // 24-hour expiry
+      );
+
+      // Store each chunk
+      const pipeline = this.redis.pipeline();
+
+      for (let i = 0; i < numChunks; i++) {
+        const chunkStart = i * CHUNK_SIZE;
+        const chunkEnd = Math.min((i + 1) * CHUNK_SIZE, entries.length);
+        const chunk = entries.slice(chunkStart, chunkEnd);
+
+        // Optional: Minimize the data size by removing unnecessary fields
+        const minimalChunk = chunk.map(([key, asset]) => {
+          // Keep only essential fields
+          const { contractAddress, meta, kind, dexPriceUsd } = asset as any;
+          return [key, { contractAddress, meta, kind, dexPriceUsd }];
+        });
+
+        pipeline.set(
+          `stonfi:assets:chunk:${i}`,
+          JSON.stringify(minimalChunk),
+          { ex: 86400 } // 24-hour expiry
+        );
+      }
+
+      await pipeline.exec();
+      console.log(
+        `Successfully stored ${entries.length} StonFi assets in ${numChunks} chunks`
+      );
+    } catch (error) {
+      console.error("Error storing StonFi assets in Redis chunks:", error);
+      // Don't throw error, just log it - we can still function without this cache
+    }
+  }
+
+  // New method to load assets from chunked Redis storage
+  private async loadStonfiAssetsFromRedis(): Promise<Map<string, any> | null> {
+    try {
+      // Get metadata about chunks
+      const metaJson = await this.redis.get("stonfi:assets:meta");
+
+      if (!metaJson) {
+        return null;
+      }
+
+      const meta =
+        typeof metaJson === "string" ? JSON.parse(metaJson) : metaJson;
+
+      if (!meta || !meta.chunks || meta.chunks < 1) {
+        return null;
+      }
+
+      // Load all chunks
+      const assetsCache = new Map();
+      const chunkKeys = [];
+
+      for (let i = 0; i < meta.chunks; i++) {
+        chunkKeys.push(`stonfi:assets:chunk:${i}`);
+      }
+
+      // Use mget for efficient multi-key retrieval
+      const chunksData = await this.redis.mget(...chunkKeys);
+
+      // Process chunks
+      for (const chunkData of chunksData) {
+        if (!chunkData) continue;
+
+        const chunk =
+          typeof chunkData === "string" ? JSON.parse(chunkData) : chunkData;
+
+        for (const [key, value] of chunk) {
+          assetsCache.set(key, value);
+        }
+      }
+
+      console.log(
+        `Loaded ${assetsCache.size}/${meta.totalAssets} assets from Redis chunks`
+      );
+      return assetsCache;
+    } catch (error) {
+      console.error("Error loading StonFi assets from Redis:", error);
+      return null;
+    }
+  }
+
+  private getStonFiAssetMetadata(tokenAddress: string): TokenMetadata {
+    // Special handling for TON
+    if (tokenAddress === "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c") {
+      return {
+        name: "TON",
+        symbol: "TON",
+        decimals: 9,
+      };
+    }
+
+    // Look up in cache
+    const cachedMetadata = this.stonfiAssetsCache.get(tokenAddress);
+
+    if (cachedMetadata) {
+      return cachedMetadata;
+    }
+
+    // Fallback if not found
+    return {
+      name: `Token (${tokenAddress.slice(0, 6)})`,
+      symbol: "UNK",
+      decimals: 9,
+    };
+  }
 
   // Convert StonFi pool format to our standard Pool format
   private async convertStonFiPool(
@@ -2831,99 +2999,118 @@ class PoolTracker extends EventEmitter {
     client?: StonApiClient
   ): Promise<Pool> {
     // Use provided client or create a new one if not provided
-    const stonfiClient = client || this.stonfiClient;
-
-    // Fetch the asset information for both tokens
-    let token0Metadata: TokenMetadata = {
-      name: "Unknown Token 0",
-      symbol: "UNK0",
-      decimals: 9,
-    };
-
-    let token1Metadata: TokenMetadata = {
-      name: "Unknown Token 1",
-      symbol: "UNK1",
-      decimals: 9,
-    };
-    let asset0Type = "jetton";
-    let asset1Type = "jetton";
 
     try {
-      const [asset0, asset1] = await Promise.all([
-        stonfiPool.token0Address
-          ? stonfiClient.getAsset(stonfiPool.token0Address)
-          : null,
-        stonfiPool.token1Address
-          ? stonfiClient.getAsset(stonfiPool.token1Address)
-          : null,
-      ]);
-
-      // Process asset0 if available
-      if (asset0) {
-        token0Metadata = {
-          name: asset0.displayName || "Unknown Token 0",
-          symbol: asset0.symbol || "UNK0",
-          decimals: asset0.decimals || 9,
-        };
-        asset0Type = asset0.kind;
+      // Validate input pool data
+      if (!stonfiPool.token0Address || !stonfiPool.token1Address) {
+        console.error("Invalid StonFi pool: Missing token addresses", {
+          address: stonfiPool.address,
+          token0Address: stonfiPool.token0Address,
+          token1Address: stonfiPool.token1Address,
+        });
+        throw new Error("Missing token addresses");
       }
 
-      // Process asset1 if available
-      if (asset1) {
-        token1Metadata = {
-          name: asset1.displayName || "Unknown Token 1",
-          symbol: asset1.symbol || "UNK1",
-          decimals: asset1.decimals || 9,
-        };
-        asset1Type = asset1.kind;
+      if (this.stonfiAssetsCache.size === 0) {
+        await this.initializeStonFiAssets();
       }
+
+      // Create token assets using the cached lookup
+      const assets: TokenAsset[] = [
+        {
+          type: "jetton",
+          address: stonfiPool.token0Address,
+          metadata: this.getStonFiAssetMetadata(stonfiPool.token0Address),
+        },
+        {
+          type: "jetton",
+          address: stonfiPool.token1Address,
+          metadata: this.getStonFiAssetMetadata(stonfiPool.token1Address),
+        },
+      ];
+
+      // Determine StonFi version
+      const stonfiVersion =
+        stonfiPool.routerAddress === this.StonfiV1 ? "v1" : "v2";
+
+      // Create Pool object with validated data
+      return {
+        address: stonfiPool.address,
+        lt: "0",
+        totalSupply: stonfiPool.lpTotalSupply || "0",
+        type: "stonfi",
+        tradeFee: stonfiPool.lpFee || "0",
+        assets: assets,
+        lastPrice: {
+          value: "0",
+        },
+        reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
+        stats: {
+          fees: [
+            stonfiPool.collectedToken0ProtocolFee || "0",
+            stonfiPool.collectedToken1ProtocolFee || "0",
+          ],
+          volume: [
+            stonfiPool.token0Balance || "0",
+            stonfiPool.token1Balance || "0",
+          ],
+        },
+        source: "stonfi",
+        version: stonfiVersion,
+        lastUpdateTimestamp: Date.now(),
+      };
     } catch (error) {
-      console.error(`Error fetching asset information:`, error);
-      // Continue with default metadata if fetching fails
+      console.error(
+        `Complete error converting StonFi pool ${stonfiPool.address}:`,
+        error
+      );
+
+      // Fallback pool object
+      return {
+        address: stonfiPool.address,
+        lt: "0",
+        totalSupply: stonfiPool.lpTotalSupply || "0",
+        type: "stonfi",
+        tradeFee: stonfiPool.lpFee || "0",
+        assets: [
+          {
+            type: "jetton",
+            address: stonfiPool.token0Address,
+            metadata: {
+              name: `Token 0 (${stonfiPool.token0Address.slice(0, 6)})`,
+              symbol:
+                stonfiPool.token0Address ===
+                "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+                  ? "TON"
+                  : "UNK0",
+              decimals: 9,
+            },
+          },
+          {
+            type: "jetton",
+            address: stonfiPool.token1Address,
+            metadata: {
+              name: `Token 1 (${stonfiPool.token1Address.slice(0, 6)})`,
+              symbol:
+                stonfiPool.token1Address ===
+                "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+                  ? "TON"
+                  : "UNK1",
+              decimals: 9,
+            },
+          },
+        ],
+        lastPrice: { value: "0" },
+        reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
+        stats: {
+          fees: ["0", "0"],
+          volume: ["0", "0"],
+        },
+        source: "stonfi",
+        version: "unknown",
+        lastUpdateTimestamp: Date.now(),
+      };
     }
-
-    // Create token assets with the fetched metadata
-    const assets: TokenAsset[] = [
-      {
-        type: asset0Type,
-        address: stonfiPool.token0Address,
-        metadata: token0Metadata,
-      },
-      {
-        type: asset1Type,
-        address: stonfiPool.token1Address,
-        metadata: token1Metadata,
-      },
-    ];
-
-    const stonfiVersion = stonfiPool.router === this.StonfiV1 ? "v1" : "v2";
-
-    // Create Pool object
-    return {
-      address: stonfiPool.address,
-      lt: "0",
-      totalSupply: stonfiPool.lpTotalSupply,
-      type: "stonfi",
-      tradeFee: stonfiPool.lpFee,
-      assets: assets,
-      lastPrice: {
-        value: "0",
-      },
-      reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
-      stats: {
-        fees: [
-          stonfiPool.collectedToken0ProtocolFee,
-          stonfiPool.collectedToken1ProtocolFee,
-        ],
-        volume: [
-          stonfiPool.token0Balance || "0",
-          stonfiPool.token1Balance || "0",
-        ],
-      },
-      source: "stonfi",
-      version: stonfiVersion,
-      lastUpdateTimestamp: Date.now(),
-    };
   }
 
   // Trigger update if needed

@@ -128,7 +128,7 @@ class PoolTracker extends EventEmitter {
 
   //Stonfi router addresses
   private StonfiV1 = DEX.v1.Router.address;
-  private stonfiAssetsCache: Map<string, TokenMetadata> = new Map();
+  private stonfiAssetsCache: Map<string, any> = new Map();
 
   // Define for TypeScript
   public performFastUpdate: () => Promise<void>;
@@ -2979,10 +2979,20 @@ class PoolTracker extends EventEmitter {
     }
 
     // Look up in cache
-    const cachedMetadata = this.stonfiAssetsCache.get(tokenAddress);
+    const cachedAsset = this.stonfiAssetsCache.get(tokenAddress);
 
-    if (cachedMetadata) {
-      return cachedMetadata;
+    if (cachedAsset) {
+      // The asset has a meta property containing the actual metadata
+      if (cachedAsset.meta) {
+        return {
+          name:
+            cachedAsset.meta.displayName ||
+            cachedAsset.meta.name ||
+            `Token (${tokenAddress.slice(0, 6)})`,
+          symbol: cachedAsset.meta.symbol || "UNK",
+          decimals: cachedAsset.meta.decimals || 9,
+        };
+      }
     }
 
     // Fallback if not found
@@ -2994,7 +3004,7 @@ class PoolTracker extends EventEmitter {
   }
 
   // Convert StonFi pool format to our standard Pool format
-  private async convertStonFiPool(
+  public async convertStonFiPool(
     stonfiPool: any,
     client?: StonApiClient
   ): Promise<Pool> {
@@ -3064,52 +3074,6 @@ class PoolTracker extends EventEmitter {
         `Complete error converting StonFi pool ${stonfiPool.address}:`,
         error
       );
-
-      // Fallback pool object
-      return {
-        address: stonfiPool.address,
-        lt: "0",
-        totalSupply: stonfiPool.lpTotalSupply || "0",
-        type: "stonfi",
-        tradeFee: stonfiPool.lpFee || "0",
-        assets: [
-          {
-            type: "jetton",
-            address: stonfiPool.token0Address,
-            metadata: {
-              name: `Token 0 (${stonfiPool.token0Address.slice(0, 6)})`,
-              symbol:
-                stonfiPool.token0Address ===
-                "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
-                  ? "TON"
-                  : "UNK0",
-              decimals: 9,
-            },
-          },
-          {
-            type: "jetton",
-            address: stonfiPool.token1Address,
-            metadata: {
-              name: `Token 1 (${stonfiPool.token1Address.slice(0, 6)})`,
-              symbol:
-                stonfiPool.token1Address ===
-                "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
-                  ? "TON"
-                  : "UNK1",
-              decimals: 9,
-            },
-          },
-        ],
-        lastPrice: { value: "0" },
-        reserves: [stonfiPool.reserve0, stonfiPool.reserve1],
-        stats: {
-          fees: ["0", "0"],
-          volume: ["0", "0"],
-        },
-        source: "stonfi",
-        version: "unknown",
-        lastUpdateTimestamp: Date.now(),
-      };
     }
   }
 

@@ -296,7 +296,7 @@ async function findBestPathsBySource(
     if (stonfiPaths.length > 0) {
       bestStonfiV2Path = { ...stonfiPaths[0], source: "stonfi" };
       console.log(
-        `Found best StonFi path with output: ${bestStonfiV1Path.outputAmount}`
+        `Found best StonFi path with output: ${bestStonfiV2Path.outputAmount}`
       );
     }
   }

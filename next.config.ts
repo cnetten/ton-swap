@@ -23,9 +23,7 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-  experimental: {
-    serverComponentsExternalPackages: ["worker_threads"],
-  },
+  serverExternalPackages: ["worker_threads"],
 };
 
 export default nextConfig;

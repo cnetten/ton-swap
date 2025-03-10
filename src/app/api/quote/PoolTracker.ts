@@ -3031,7 +3031,7 @@ class PoolTracker extends EventEmitter {
 
       // Determine StonFi version
       const stonfiVersion =
-        stonfiPool.routerAddress === this.StonfiV1 ? "v1" : "v2";
+        stonfiPool.routerAddress === this.StonfiV1.toString() ? "v1" : "v2";
 
       // Create Pool object with validated data
       return {

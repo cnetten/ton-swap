@@ -147,7 +147,8 @@ async function findBestPathsBySource(
   slippageDecimal: number
 ): Promise<{
   bestDedustPath: PathWithCost | null;
-  bestStonfiPath: PathWithCost | null;
+  bestStonfiV1Path: PathWithCost | null;
+  bestStonfiV2Path: PathWithCost | null;
   allFilteredPools: Pool[];
 }> {
   const poolService = PoolService.getInstance();
@@ -183,18 +184,27 @@ async function findBestPathsBySource(
     0.5
   );
 
-  const filteredStonfiPools = tracker.filterPoolsByLiquidity(
+  const filteredStonfiPoolsV1 = tracker.filterPoolsByLiquidity(
     "stonfi",
     minLiquidity,
-    0.5
+    0.5,
+    "v1"
+  );
+
+  const filteredStonfiPoolsV2 = tracker.filterPoolsByLiquidity(
+    "stonfi",
+    minLiquidity,
+    0.5,
+    "v2"
   );
 
   console.log(
-    `After filtering: ${filteredDedustPools.length} DeDust pools and ${filteredStonfiPools.length} StonFi pools`
+    `After filtering: ${filteredDedustPools.length} DeDust pools, ${filteredStonfiPoolsV1.length} StonFi V1 pools and ${filteredStonfiPoolsV2.length} StonFi V2 pools`
   );
 
   let bestDedustPath: any | null = null;
-  let bestStonfiPath: any | null = null;
+  let bestStonfiV1Path: any | null = null;
+  let bestStonfiV2Path: any | null = null;
 
   // Find best path for DeDust pools
   if (filteredDedustPools.length > 0) {
@@ -221,9 +231,9 @@ async function findBestPathsBySource(
   }
 
   // Find best path for StonFi pools (only if enough pools are available)
-  if (filteredStonfiPools.length > 0) {
+  if (filteredStonfiPoolsV1.length > 0) {
     const { poolGraph: stonfiGraph, poolsByPair: stonfiPoolsByPair } =
-      buildPoolGraph(filteredStonfiPools);
+      buildPoolGraph(filteredStonfiPoolsV1);
 
     console.log(`StonFi graph has ${stonfiGraph.size} nodes`);
 
@@ -249,19 +259,59 @@ async function findBestPathsBySource(
     );
 
     if (stonfiPaths.length > 0) {
-      bestStonfiPath = { ...stonfiPaths[0], source: "stonfi" };
+      bestStonfiV1Path = { ...stonfiPaths[0], source: "stonfi" };
       console.log(
-        `Found best StonFi path with output: ${bestStonfiPath.outputAmount}`
+        `Found best StonFi path with output: ${bestStonfiV1Path.outputAmount}`
+      );
+    }
+  }
+
+  if (filteredStonfiPoolsV2.length > 0) {
+    const { poolGraph: stonfiGraph, poolsByPair: stonfiPoolsByPair } =
+      buildPoolGraph(filteredStonfiPoolsV2);
+
+    console.log(`StonFi graph has ${stonfiGraph.size} nodes`);
+
+    const stonFiFromAdress =
+      fromAddress === "native"
+        ? "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+        : fromAddress;
+    const stonFiToAddress =
+      toAddress === "native"
+        ? "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+        : toAddress;
+
+    console.log("Finding swap paths for StonFi pools...");
+    const stonfiPaths = await findSwapPathsParallel(
+      stonfiGraph,
+      stonfiPoolsByPair,
+      stonFiFromAdress,
+      stonFiToAddress,
+      amountWithDecimals,
+      4, // maxDepth
+      1, // maxPaths
+      "stonfi"
+    );
+
+    if (stonfiPaths.length > 0) {
+      bestStonfiV2Path = { ...stonfiPaths[0], source: "stonfi" };
+      console.log(
+        `Found best StonFi path with output: ${bestStonfiV1Path.outputAmount}`
       );
     }
   }
 
   // Combine all filtered pools for reference
-  const allFilteredPools = [...filteredDedustPools, ...filteredStonfiPools];
+  const allFilteredPools = [
+    ...filteredDedustPools,
+    ...filteredStonfiPoolsV1,
+    ...filteredStonfiPoolsV2,
+  ];
 
   const result = {
     bestDedustPath,
-    bestStonfiPath,
+    bestStonfiV1Path,
+    bestStonfiV2Path,
     allFilteredPools,
     timestamp: Date.now(), // Add timestamp to result
   };
@@ -280,24 +330,30 @@ async function findBestPathsBySource(
 // Compare and select the best path overall
 function selectBestPath(
   dedustPath: PathWithCost | null,
-  stonfiPath: PathWithCost | null
+  stonfiV1Path: PathWithCost | null,
+  stonfiV2Path: PathWithCost | null
 ): PathWithCost | null {
-  if (!dedustPath && !stonfiPath) {
+  const validPaths = [dedustPath, stonfiV1Path, stonfiV2Path].filter(
+    Boolean
+  ) as PathWithCost[];
+
+  if (validPaths.length === 0) {
     return null;
   }
 
-  if (!dedustPath) return stonfiPath;
-  if (!stonfiPath) return dedustPath;
+  if (validPaths.length === 1) {
+    return validPaths[0];
+  }
 
-  // Compare output amounts to determine which is better
-  const dedustOutput = BigInt(dedustPath.outputAmount);
-  const stonfiOutput = BigInt(stonfiPath.outputAmount);
+  return validPaths.reduce((best, current) => {
+    if (!best) return current;
+    if (!current) return best;
 
-  console.log(
-    `Comparing outputs - DeDust: ${dedustOutput}, StonFi: ${stonfiOutput}`
-  );
+    const bestOutput = BigInt(best.outputAmount);
+    const currentOutput = BigInt(current.outputAmount);
 
-  return dedustOutput >= stonfiOutput ? dedustPath : stonfiPath;
+    return currentOutput > bestOutput ? current : best;
+  }, null as PathWithCost | null);
 }
 
 export async function POST(req: Request) {
@@ -485,11 +541,19 @@ export async function POST(req: Request) {
     });
 
     // Race between path finding and timeout
-    const { bestDedustPath, bestStonfiPath, allFilteredPools } =
-      (await Promise.race([pathFindingPromise, timeoutPromise])) as any;
+    const {
+      bestDedustPath,
+      bestStonfiV1Path,
+      bestStonfiV2Path,
+      allFilteredPools,
+    } = (await Promise.race([pathFindingPromise, timeoutPromise])) as any;
 
     // Select the best path overall
-    const bestPath = selectBestPath(bestDedustPath, bestStonfiPath);
+    const bestPath = selectBestPath(
+      bestDedustPath,
+      bestStonfiV1Path,
+      bestStonfiV2Path
+    );
 
     if (!bestPath) {
       return NextResponse.json({
@@ -502,10 +566,16 @@ export async function POST(req: Request) {
                 pathDepth: bestDedustPath.pathDepth,
               }
             : null,
-          stonfi: bestStonfiPath
+          stonfiV1: bestStonfiV1Path
             ? {
-                outputAmount: bestStonfiPath.outputAmount,
-                pathDepth: bestStonfiPath.pathDepth,
+                outputAmount: bestStonfiV1Path.outputAmount,
+                pathDepth: bestStonfiV1Path.pathDepth,
+              }
+            : null,
+          stonfiV2: bestStonfiV2Path
+            ? {
+                outputAmount: bestStonfiV2Path.outputAmount,
+                pathDepth: bestStonfiV2Path.pathDepth,
               }
             : null,
         },
@@ -551,13 +621,22 @@ export async function POST(req: Request) {
               pathDepth: bestDedustPath.pathDepth,
             }
           : null,
-        stonfi: bestStonfiPath
+        stonfiV1: bestStonfiV1Path
           ? {
               outputAmount: normalizeAmount(
-                bestStonfiPath.outputAmount,
+                bestStonfiV1Path.outputAmount,
                 toDecimals
               ),
-              pathDepth: bestStonfiPath.pathDepth,
+              pathDepth: bestStonfiV1Path.pathDepth,
+            }
+          : null,
+        stonfiV2: bestStonfiV2Path
+          ? {
+              outputAmount: normalizeAmount(
+                bestStonfiV2Path.outputAmount,
+                toDecimals
+              ),
+              pathDepth: bestStonfiV2Path.pathDepth,
             }
           : null,
         bestExchange: bestPath.source,

@@ -20,7 +20,6 @@ import {
 } from "@dedust/sdk";
 import { TonClient4 } from "@ton/ton";
 import { DEX, pTON } from "@ston-fi/sdk";
-import { prototype } from "events";
 
 // Helper function to convert token amount with decimals
 function convertTokenAmount(humanReadableAmount, decimals) {
@@ -100,16 +99,16 @@ export const SwapInterface = () => {
         Array.isArray(simulation.swapPaths) &&
         simulation.swapPaths.length > 0;
 
-        let protocol;
+      let protocol;
 
-        if (hasValidPath && simulation.swapPaths[0]?.source === 'dedust') {
-          protocol = 'DeDust'
-        } else if(hasValidPath && simulation.swapPaths[0]?.source === 'stonfi' ){
-            const version = simulation?.swapPaths[0]?.pools[0]?.version
-            protocol = version === 'v1' ? "StonFi_v1" : "StonFi_v2"
-        } else {
-          protocol = simulation.swapPaths[0]?.source
-        }
+      if (hasValidPath && simulation.swapPaths[0]?.source === "dedust") {
+        protocol = "DeDust";
+      } else if (hasValidPath && simulation.swapPaths[0]?.source === "stonfi") {
+        const version = simulation?.swapPaths[0]?.pools[0]?.version;
+        protocol = version === "v1" ? "StonFi_v1" : "StonFi_v2";
+      } else {
+        protocol = simulation.swapPaths[0]?.source;
+      }
 
       setState((prev) => ({
         ...prev,
@@ -284,12 +283,16 @@ export const SwapInterface = () => {
     try {
       // Check if this is a multi-hop swap
       const multiHop = isMultiHopSwap(swapPath);
-      
+
       if (multiHop) {
-        console.log("Multi-hop swaps are not supported for StonFi at this time");
-        throw new Error("Multi-hop swaps are not supported for StonFi at this time");
+        console.log(
+          "Multi-hop swaps are not supported for StonFi at this time"
+        );
+        throw new Error(
+          "Multi-hop swaps are not supported for StonFi at this time"
+        );
       }
-      
+
       const tonClient = new TonClient4({
         endpoint: "https://mainnet-v4.tonhubapi.com",
       });
@@ -297,25 +300,25 @@ export const SwapInterface = () => {
       // Properly handle native TON token which might be represented as an address or "native"
       let fromToken = swapPath.path[0];
       let toToken = swapPath.path[swapPath.path.length - 1];
-      
+
       // Normalize token addresses - check for TON native address
       const TON_ADDRESS = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c";
       if (fromToken === TON_ADDRESS) {
         fromToken = "native";
       }
-      
+
       if (toToken === TON_ADDRESS) {
         toToken = "native";
       }
 
       // Get decimals for the from token
-      const fromDecimals = 
-        fromToken === "native" 
+      const fromDecimals =
+        fromToken === "native"
           ? 9
           : swapPath.pools[0].assets.find(
               (a) => (a.address || a.type) === fromToken
             )?.metadata?.decimals || 9;
-      
+
       // Calculate input amount with correct decimals
       let inputAmount;
       if (fromToken === "native") {
@@ -325,15 +328,18 @@ export const SwapInterface = () => {
       }
 
       // Calculate minimum output amount (using proper decimals)
-      const toDecimals = 
-        toToken === "native" 
+      const toDecimals =
+        toToken === "native"
           ? 9
           : swapPath.pools[0].assets.find(
               (a) => (a.address || a.type) === toToken
             )?.metadata?.decimals || 9;
-            
-      const minAskAmount = convertTokenAmount(swapPath.minimumAmountOut, toDecimals);
-      
+
+      const minAskAmount = convertTokenAmount(
+        swapPath.minimumAmountOut,
+        toDecimals
+      );
+
       // Log important parameters for debugging
       console.log("Swap parameters:", {
         version,
@@ -341,7 +347,7 @@ export const SwapInterface = () => {
         toToken: toToken === "native" ? "TON" : toToken,
         inputAmount: inputAmount.toString(),
         minAskAmount: minAskAmount.toString(),
-        userAddress: userFriendlyAddress
+        userAddress: userFriendlyAddress,
       });
 
       // StonFi v1 handling - using the SDK as documented
@@ -349,14 +355,14 @@ export const SwapInterface = () => {
         console.log("Creating StonFi v1 router");
         const router = tonClient.open(new DEX.v1.Router());
         const proxyTon = new pTON.v1();
-        
+
         // Generate transaction parameters based on swap type
         let txParams;
-        
+
         if (fromToken === "native" && toToken !== "native") {
           // TON to Jetton swap
           console.log("Preparing v1 TON to Jetton swap");
-          
+
           txParams = await router.getSwapTonToJettonTxParams({
             userWalletAddress: userFriendlyAddress,
             proxyTon: proxyTon,
@@ -365,11 +371,10 @@ export const SwapInterface = () => {
             minAskAmount: minAskAmount.toString(),
             queryId: Date.now(),
           });
-          
         } else if (fromToken !== "native" && toToken === "native") {
           // Jetton to TON swap
           console.log("Preparing v1 Jetton to TON swap");
-          
+
           txParams = await router.getSwapJettonToTonTxParams({
             userWalletAddress: userFriendlyAddress,
             offerJettonAddress: fromToken,
@@ -378,11 +383,10 @@ export const SwapInterface = () => {
             minAskAmount: minAskAmount.toString(),
             queryId: Date.now(),
           });
-          
         } else if (fromToken !== "native" && toToken !== "native") {
           // Jetton to Jetton swap
           console.log("Preparing v1 Jetton to Jetton swap");
-          
+
           txParams = await router.getSwapJettonToJettonTxParams({
             userWalletAddress: userFriendlyAddress,
             offerJettonAddress: fromToken,
@@ -391,7 +395,6 @@ export const SwapInterface = () => {
             minAskAmount: minAskAmount.toString(),
             queryId: Date.now(),
           });
-          
         } else {
           throw new Error("Invalid swap path: Both tokens are native TON");
         }
@@ -399,13 +402,13 @@ export const SwapInterface = () => {
         console.log("v1 transaction parameters:", {
           to: txParams.to.toString(),
           value: txParams.value.toString(),
-          hasBody: !!txParams.body
+          hasBody: !!txParams.body,
         });
-        
+
         // Send the transaction
         try {
           let payload = null;
-          if (txParams.body && typeof txParams.body.toBoc === 'function') {
+          if (txParams.body && typeof txParams.body.toBoc === "function") {
             payload = txParams.body.toBoc().toString("base64");
           }
 
@@ -415,34 +418,36 @@ export const SwapInterface = () => {
               {
                 address: txParams.to.toString(),
                 amount: txParams.value.toString(),
-                payload: payload
+                payload: payload,
               },
             ],
           });
-          
+
           return true;
         } catch (error) {
           console.error("v1 transaction error:", error);
           throw error;
         }
-      } 
+      }
       // StonFi v2 handling (which is actually v2.1)
       else if (version === "v2") {
         // For v2.1, we need to use the specific router address
-        const routerAddress = "kQALh-JBBIKK7gr0o4AVf9JZnEsFndqO0qTCyT-D-yBsWk0v"; // Mainnet Router v2.1.0
+        const routerAddress =
+          "kQALh-JBBIKK7gr0o4AVf9JZnEsFndqO0qTCyT-D-yBsWk0v"; // Mainnet Router v2.1.0
         const router = tonClient.open(DEX.v2_1.Router.create(routerAddress));
-        
+
         // Create proxyTon for v2.1
-        const proxyTonAddress = "kQACS30DNoUQ7NfApPvzh7eBmSZ9L4ygJ-lkNWtba8TQT-Px"; // Mainnet pTON v2.1.0
+        const proxyTonAddress =
+          "kQACS30DNoUQ7NfApPvzh7eBmSZ9L4ygJ-lkNWtba8TQT-Px"; // Mainnet pTON v2.1.0
         const proxyTon = pTON.v2_1.create(proxyTonAddress);
-        
+
         // Generate transaction parameters based on swap type
         let txParams;
-        
+
         if (fromToken === "native" && toToken !== "native") {
           // TON to Jetton swap
           console.log("Preparing v2.1 TON to Jetton swap");
-          
+
           txParams = await router.getSwapTonToJettonTxParams({
             userWalletAddress: userFriendlyAddress,
             proxyTon: proxyTon,
@@ -451,11 +456,10 @@ export const SwapInterface = () => {
             minAskAmount: minAskAmount.toString(),
             queryId: Date.now(),
           });
-          
         } else if (fromToken !== "native" && toToken === "native") {
           // Jetton to TON swap
           console.log("Preparing v2.1 Jetton to TON swap");
-          
+
           txParams = await router.getSwapJettonToTonTxParams({
             userWalletAddress: userFriendlyAddress,
             offerJettonAddress: fromToken,
@@ -464,11 +468,10 @@ export const SwapInterface = () => {
             minAskAmount: minAskAmount.toString(),
             queryId: Date.now(),
           });
-          
         } else if (fromToken !== "native" && toToken !== "native") {
           // Jetton to Jetton swap
           console.log("Preparing v2.1 Jetton to Jetton swap");
-          
+
           txParams = await router.getSwapJettonToJettonTxParams({
             userWalletAddress: userFriendlyAddress,
             offerJettonAddress: fromToken,
@@ -477,7 +480,6 @@ export const SwapInterface = () => {
             minAskAmount: minAskAmount.toString(),
             queryId: Date.now(),
           });
-          
         } else {
           throw new Error("Invalid swap path: Both tokens are native TON");
         }
@@ -485,13 +487,13 @@ export const SwapInterface = () => {
         console.log("v2.1 transaction parameters:", {
           to: txParams.to.toString(),
           value: txParams.value.toString(),
-          hasBody: !!txParams.body
+          hasBody: !!txParams.body,
         });
-        
+
         // Send the transaction
         try {
           let payload = null;
-          if (txParams.body && typeof txParams.body.toBoc === 'function') {
+          if (txParams.body && typeof txParams.body.toBoc === "function") {
             payload = txParams.body.toBoc().toString("base64");
           }
 
@@ -501,18 +503,17 @@ export const SwapInterface = () => {
               {
                 address: txParams.to.toString(),
                 amount: txParams.value.toString(),
-                payload: payload
+                payload: payload,
               },
             ],
           });
-          
+
           return true;
         } catch (error) {
           console.error("v2.1 transaction error:", error);
           throw error;
         }
-      }
-      else {
+      } else {
         throw new Error(`Unsupported StonFi version: ${version}`);
       }
     } catch (error) {
@@ -543,42 +544,47 @@ export const SwapInterface = () => {
 
       // Check if this is a multi-hop swap
       const multiHop = isMultiHopSwap(swapPath);
-      
+
       // For StonFi, reject multi-hop swaps
       if (state.protocol === "stonfi" && multiHop) {
-        throw new Error("Multi-hop swaps are not supported for StonFi at this time");
+        throw new Error(
+          "Multi-hop swaps are not supported for StonFi at this time"
+        );
       }
-      
+
       // Log swap details for debugging
       console.log("Executing swap:", {
         protocol: state.protocol,
         multiHop,
         pathLength: swapPath.path.length,
         poolsCount: swapPath.pools.length,
-        route: state.swapRoute
+        route: state.swapRoute,
       });
 
       // Choose the appropriate swap function based on the protocol
       if (state.protocol === "DeDust") {
         console.log("Using DeDust for swap");
         await prepareTonConnectMultiHopSwap(tonConnectUI, swapPath);
-      } else if (state.protocol === "StonFi_v1" || state.protocol === "StonFi_v2") {
+      } else if (
+        state.protocol === "StonFi_v1" ||
+        state.protocol === "StonFi_v2"
+      ) {
         // Check if it's v1 or v2.1 based on pool data
         const poolInfo = swapPath.pools[0];
-        
+
         // Log the pool info to help debugging
         console.log("StonFi pool info:", {
           address: poolInfo?.address,
           version: poolInfo?.version,
-          source: poolInfo?.source
+          source: poolInfo?.source,
         });
-        
+
         // Determine version (v2 is actually v2.1)
         let version = "v1";
         if (poolInfo?.version && poolInfo.version.startsWith("v2")) {
           version = "v2"; // We'll treat all v2.x as v2.1 internally
         }
-        
+
         console.log(`Using StonFi ${version} for swap`);
         await prepareStonFiSwap(tonConnectUI, swapPath, version);
       } else {

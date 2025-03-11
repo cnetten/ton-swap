@@ -770,12 +770,14 @@ export const SwapInterface = () => {
                 isLoading
               }
             >
-              {error || !state.rawSimulation?.swapPaths?.[0]
-                ? "Failed to find quote"
-                : isSwapping
+              {isSwapping
                 ? "Swapping..."
                 : !isConnected
                 ? "Connect Wallet"
+                : !state.fromAmount
+                ? "Enter Amount"
+                : error || !state.rawSimulation?.swapPaths?.[0]
+                ? "Failed to find quote"
                 : isLoading
                 ? "Loading..."
                 : "Swap"}

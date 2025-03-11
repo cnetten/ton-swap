@@ -17,6 +17,7 @@ export async function findSwapPathsParallel(
     // Get initial set of nodes to distribute work
     const startNodes = Array.from(graph.get(from)?.keys() || []);
     if (startNodes.length === 0) return [];
+    
     // Prepare data for workers
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serializedGraph: any = {};
@@ -25,8 +26,12 @@ export async function findSwapPathsParallel(
     }
     const serializedPools = Object.fromEntries(poolsByPair);
 
-    // Determine number of workers based on available paths
-    const numWorkers = Math.min(4, startNodes.length);
+    // If this is StonFi, we'll only look for direct path so we don't need multiple workers
+    const isStonfiProtocol = protocol === "stonfi";
+    const numWorkers = isStonfiProtocol ? 1 : Math.min(4, startNodes.length);
+    
+    console.log(`Protocol: ${protocol}, using ${numWorkers} workers, direct path only: ${isStonfiProtocol}`);
+    
     const workerPromises: Promise<PathWithCost[]>[] = [];
     const workers: Worker[] = [];
 
@@ -68,6 +73,7 @@ export async function findSwapPathsParallel(
                 maxDepth,
                 graph: serializedGraph,
                 poolsByPair: serializedPools,
+                protocol, // Pass protocol to worker so it knows if it's StonFi
               },
             }
           );

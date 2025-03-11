@@ -385,6 +385,9 @@ function findPathsFromNode(
 
 // This is where the main execution code starts
 if (parentPort) {
+  // Check if we're working with StonFi and should only find direct paths
+  const isStonfiProtocol = workerData.protocol === "stonfi";
+
   // First check for direct path - this is important to try first
   const directPath = findDirectPath(
     workerData.graph,
@@ -394,23 +397,28 @@ if (parentPort) {
     workerData.inputAmount
   );
 
-  // Then find multi-hop paths
+  // Then find multi-hop paths (only for non-StonFi protocols)
   const allPaths = [];
+  
   if (directPath) {
     allPaths.push(directPath);
   }
 
-  // Always look for multi-hop paths
-  for (const startStep of workerData.startNodes) {
-    const paths = findPathsFromNode(
-      workerData.graph,
-      workerData.poolsByPair,
-      startStep,
-      workerData.targetNode,
-      workerData.maxDepth,
-      workerData.from
-    );
-    allPaths.push(...paths);
+  // Only search for multi-hop paths if not using StonFi
+  if (!isStonfiProtocol) {
+    for (const startStep of workerData.startNodes) {
+      const paths = findPathsFromNode(
+        workerData.graph,
+        workerData.poolsByPair,
+        startStep,
+        workerData.targetNode,
+        workerData.maxDepth,
+        workerData.from
+      );
+      allPaths.push(...paths);
+    }
+  } else {
+    console.log("StonFi protocol: Only using direct path, skipping multi-hop search");
   }
 
   // Sort by output amount and prefer shorter paths when outputs are similar

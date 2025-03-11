@@ -30,6 +30,7 @@ export interface PathWithCost {
   outputAmount: string;
   outPerIn: string;
   pathDepth: number;
+  source?: string;
 }
 
 export interface WorkerData {

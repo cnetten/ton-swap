@@ -22,7 +22,7 @@ export const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
   const [jettonBalances, setJettonBalances] = useState<JettonBalances>([]);
   const userFriendlyAddress = useTonAddress();
 
-  const navigation = [{ name: "Swap", href: "/", icon: ArrowLeftRight }];
+  const navigation = [{ name: "Trade", href: "/", icon: ArrowLeftRight }];
   console.log(jettonBalances);
   useEffect(() => {
     const fetchBalance = async () => {

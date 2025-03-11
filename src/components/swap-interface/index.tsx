@@ -21,6 +21,7 @@ import {
 } from "@dedust/sdk";
 import { TonClient4 } from "@ton/ton";
 import { DEX, pTON } from "@ston-fi/sdk";
+import MultiRouteInfo from "./MultiRouteInfo";
 
 // Helper function to convert token amount with decimals
 function convertTokenAmount(humanReadableAmount, decimals) {
@@ -59,6 +60,9 @@ export const SwapInterface = () => {
     swapRoute: "",
     protocol: "",
     receiveAtLeast: "",
+    isMultiRoute: false,
+    multiRouteInfo: null,
+    swapPaths: [],
   });
 
   useEffect(() => {
@@ -102,31 +106,66 @@ export const SwapInterface = () => {
         Array.isArray(simulation.swapPaths) &&
         simulation.swapPaths.length > 0;
 
-      let protocol;
+      // Check if this is a multi-route response
+      const isMultiRoute = hasValidPath && simulation.isMultiRoute === true;
 
-      if (hasValidPath && simulation.swapPaths[0]?.source === "dedust") {
-        protocol = "DeDust";
-      } else if (hasValidPath && simulation.swapPaths[0]?.source === "stonfi") {
-        const version = simulation?.swapPaths[0]?.pools[0]?.version;
-        protocol = version === "v1" ? "StonFi_v1" : "StonFi_v2";
+      let protocol;
+      let swapRoute;
+      let receiveAtLeast;
+      let outPerIn;
+      let toAmount;
+
+      if (isMultiRoute) {
+        protocol = "Multi-Route";
+        swapRoute = simulation.multiRouteInfo.pathReadable;
+        toAmount = simulation.multiRouteInfo.totalOutput;
+
+        // Calculate weighted average of minimumAmountOut
+        receiveAtLeast = simulation.swapPaths
+          .reduce((total, path) => {
+            return total + path.minimumAmountOut * (path.percentage / 100);
+          }, 0)
+          .toString();
+
+        // Use total output / total input for outPerIn
+        const totalInput = Number(amount);
+        outPerIn = (Number(toAmount) / totalInput).toFixed(9);
+      } else if (hasValidPath) {
+        // Single path logic
+        if (simulation.swapPaths[0]?.source === "dedust") {
+          protocol = "DeDust";
+        } else if (simulation.swapPaths[0]?.source === "stonfi") {
+          const version = simulation?.swapPaths[0]?.pools[0]?.version;
+          protocol = version === "v1" ? "StonFi_v1" : "StonFi_v2";
+        } else {
+          protocol = simulation.swapPaths[0]?.source;
+        }
+
+        swapRoute = simulation.swapPaths[0]?.pathReadable || "";
+        toAmount = simulation.swapPaths[0]?.estimatedOutput || "";
+        receiveAtLeast = simulation.swapPaths[0]?.minimumAmountOut || "0";
+        outPerIn = simulation.swapPaths[0]?.outPerIn || "0";
       } else {
-        protocol = simulation.swapPaths[0]?.source;
+        // No valid paths
+        protocol = "";
+        swapRoute = "";
+        toAmount = "";
+        receiveAtLeast = "0";
+        outPerIn = "0";
       }
 
       setState((prev) => ({
         ...prev,
         rawSimulation: simulation || {},
-        toAmount: hasValidPath
-          ? simulation.swapPaths[0]?.estimatedOutput || ""
-          : "",
-        swapRoute: hasValidPath
-          ? simulation.swapPaths[0]?.pathReadable || ""
-          : "",
-        outPerIn: hasValidPath ? simulation.swapPaths[0]?.outPerIn || "0" : "0",
-        receiveAtLeast: hasValidPath
-          ? simulation.swapPaths[0]?.minimumAmountOut || "0"
-          : "0",
+        toAmount: toAmount,
+        swapRoute: swapRoute,
+        outPerIn: outPerIn,
+        receiveAtLeast: receiveAtLeast,
         protocol: protocol,
+        // Add multi-route information
+        isMultiRoute: isMultiRoute,
+        multiRouteInfo: isMultiRoute ? simulation.multiRouteInfo : null,
+        swapPaths: hasValidPath ? simulation.swapPaths : [],
       }));
     } catch (error) {
       console.error("Failed to simulate swap:", error);
@@ -137,6 +176,9 @@ export const SwapInterface = () => {
         outPerIn: "0",
         receiveAtLeast: "0",
         protocol: "",
+        isMultiRoute: false,
+        multiRouteInfo: null,
+        swapPaths: [],
       }));
     }
   }, 500);
@@ -680,77 +722,86 @@ export const SwapInterface = () => {
             />
 
             {state.fromAmount && state.toAmount && !isLoading && !error && (
-              <div
-                className={`p-3 rounded-lg space-y-1 ${
-                  theme === "dark" ? "bg-zinc-900" : "bg-gray-50"
-                }`}
-              >
-                <div className="flex justify-between text-sm">
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-400" : "text-gray-500"
-                    }
-                  >
-                    Route
-                  </span>
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-300" : "text-gray-700"
-                    }
-                  >
-                    {state.swapRoute}
-                  </span>
+              <>
+                <div
+                  className={`p-3 rounded-lg space-y-1 ${
+                    theme === "dark" ? "bg-zinc-900" : "bg-gray-50"
+                  }`}
+                >
+                  <div className="flex justify-between text-sm">
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-400" : "text-gray-500"
+                      }
+                    >
+                      Route
+                    </span>
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-300" : "text-gray-700"
+                      }
+                    >
+                      {state.swapRoute}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-400" : "text-gray-500"
+                      }
+                    >
+                      Receive at least
+                    </span>
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-300" : "text-gray-700"
+                      }
+                    >
+                      {state.receiveAtLeast} {state.toToken.meta.symbol}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-400" : "text-gray-500"
+                      }
+                    >
+                      Rate
+                    </span>
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-300" : "text-gray-700"
+                      }
+                    >
+                      1 {state.fromToken.meta.symbol} = {state.outPerIn}{" "}
+                      {state.toToken.meta.symbol}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-400" : "text-gray-500"
+                      }
+                    >
+                      Protocol
+                    </span>
+                    <span
+                      className={
+                        theme === "dark" ? "text-gray-300" : "text-gray-700"
+                      }
+                    >
+                      {state.protocol}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-400" : "text-gray-500"
-                    }
-                  >
-                    Receive at least
-                  </span>
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-300" : "text-gray-700"
-                    }
-                  >
-                    {state.receiveAtLeast} {state.toToken.meta.symbol}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-400" : "text-gray-500"
-                    }
-                  >
-                    Rate
-                  </span>
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-300" : "text-gray-700"
-                    }
-                  >
-                    1 {state.fromToken.meta.symbol} = {state.outPerIn}{" "}
-                    {state.toToken.meta.symbol}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-400" : "text-gray-500"
-                    }
-                  >
-                    Protocol
-                  </span>
-                  <span
-                    className={
-                      theme === "dark" ? "text-gray-300" : "text-gray-700"
-                    }
-                  >
-                    {state.protocol}
-                  </span>
-                </div>
-              </div>
+                {state.isMultiRoute && (
+                  <MultiRouteInfo
+                    isMultiRoute={state.isMultiRoute}
+                    swapPaths={state.swapPaths}
+                    multiRouteInfo={state.multiRouteInfo}
+                  />
+                )}
+              </>
             )}
 
             <Button

@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { findSwapPathsParallel } from "./parallel-finder";
 import { PoolService } from "./PoolTracker";
+import { findBestMultiRoute, formatMultiRoutePath } from "./multi-route-finder";
 
 // Initialize on first request
 let initialized = false;
@@ -327,35 +328,6 @@ async function findBestPathsBySource(
   return result;
 }
 
-// Compare and select the best path overall
-function selectBestPath(
-  dedustPath: PathWithCost | null,
-  stonfiV1Path: PathWithCost | null,
-  stonfiV2Path: PathWithCost | null
-): PathWithCost | null {
-  const validPaths = [dedustPath, stonfiV1Path, stonfiV2Path].filter(
-    Boolean
-  ) as PathWithCost[];
-
-  if (validPaths.length === 0) {
-    return null;
-  }
-
-  if (validPaths.length === 1) {
-    return validPaths[0];
-  }
-
-  return validPaths.reduce((best, current) => {
-    if (!best) return current;
-    if (!current) return best;
-
-    const bestOutput = BigInt(best.outputAmount);
-    const currentOutput = BigInt(current.outputAmount);
-
-    return currentOutput > bestOutput ? current : best;
-  }, null as PathWithCost | null);
-}
-
 export async function POST(req: Request) {
   if (!initialized) {
     await initializePoolService();
@@ -365,8 +337,14 @@ export async function POST(req: Request) {
   const startTime = performance.now();
 
   try {
-    const { fromAddress, toAddress, amount, slippageTolerance, forceRefresh } =
-      await req.json();
+    const {
+      fromAddress,
+      toAddress,
+      amount,
+      slippageTolerance,
+      forceRefresh,
+      disableMultiRoute,
+    } = await req.json();
 
     if (!fromAddress || !toAddress || !amount || isNaN(amount) || amount <= 0) {
       return NextResponse.json(
@@ -445,7 +423,6 @@ export async function POST(req: Request) {
     const amountInteger = Math.floor(amountNumber * 10 ** fromDecimals);
     const amountWithDecimals = BigInt(amountInteger).toString();
 
-    // Try to get cached path if not forcing refresh
     // Try to get cached path if not forcing refresh
     if (!forceRefresh) {
       try {
@@ -540,119 +517,261 @@ export async function POST(req: Request) {
       setTimeout(() => reject(new Error("Path finding timed out")), 20000);
     });
 
-    // Race between path finding and timeout
+    // Parameters for multi-route functionality
+    const MIN_AMOUNT_FOR_MULTI_ROUTE = "1000000000"; // 1 TON in nanoTON
+    const MIN_IMPROVEMENT_PERCENT = 3; // Require at least 3% improvement
+
+    // Find paths for each protocol
     const {
       bestDedustPath,
       bestStonfiV1Path,
       bestStonfiV2Path,
       allFilteredPools,
-    } = (await Promise.race([pathFindingPromise, timeoutPromise])) as any;
+    } = (await Promise.race([pathFindingPromise, timeoutPromise])) as {
+      bestDedustPath: PathWithCost | null;
+      bestStonfiV1Path: PathWithCost | null;
+      bestStonfiV2Path: PathWithCost | null;
+      allFilteredPools: Pool[];
+    };
 
-    // Select the best path overall
-    const bestPath = selectBestPath(
-      bestDedustPath,
-      bestStonfiV1Path,
-      bestStonfiV2Path
-    );
+    // Get token decimals for formatting outputs
+    const toDecimals = getTokenDecimals(actualToAddress, allFilteredPools);
 
-    if (!bestPath) {
-      return NextResponse.json({
-        error: "No valid swap paths found",
-        swapPaths: [],
+    // Check if multi-route should be enabled
+    const enableMultiRoute = !disableMultiRoute;
+
+    // Find multi-route options if enabled
+    const multiRouteResult = enableMultiRoute
+      ? findBestMultiRoute(
+          bestDedustPath,
+          bestStonfiV1Path,
+          bestStonfiV2Path,
+          preciseAmountWithDecimals,
+          MIN_IMPROVEMENT_PERCENT,
+          MIN_AMOUNT_FOR_MULTI_ROUTE
+        )
+      : {
+          useMultiRoute: false,
+          bestSinglePath: null,
+          multiRoute: {
+            paths: [],
+            percentages: [],
+            outputs: [],
+            totalOutput: "0",
+          },
+        };
+
+    // Format the response based on whether we're using multi-route or single path
+    let result;
+
+    if (multiRouteResult.useMultiRoute) {
+      // Handle multi-route response
+      const multiRoutePaths = multiRouteResult.multiRoute.paths
+        .map((path, index) => {
+          if (!path) return null;
+
+          const percentage = multiRouteResult.multiRoute.percentages[index];
+          const outputAmount = multiRouteResult.multiRoute.outputs[index];
+          const inputPercentage = percentage / 100;
+
+          // Calculate input amount for this path
+          const pathInputAmount = BigInt(
+            Math.floor(Number(preciseAmountWithDecimals) * inputPercentage)
+          ).toString();
+
+          return {
+            ...path,
+            path: path.path,
+            pathReadable: path.pathReadable,
+            outPutMint: actualToAddress,
+            pools: path.pools,
+            inputAmount: normalizeAmount(pathInputAmount, actualFromDecimals),
+            estimatedOutput: normalizeAmount(outputAmount, toDecimals),
+            minimumAmountOut:
+              Number(normalizeAmount(outputAmount, toDecimals)) -
+              Number(normalizeAmount(outputAmount, toDecimals)) *
+                slippageDecimal,
+            estimatedGasFees: 0,
+            outPerIn: (
+              Number(normalizeAmount(outputAmount, toDecimals)) /
+              (Number(normalizeAmount(pathInputAmount, actualFromDecimals)) ||
+                1)
+            ).toFixed(9),
+            pathDepth: path.pathDepth,
+            source: path.source,
+            percentage: percentage,
+          };
+        })
+        .filter(Boolean);
+
+      // Create human-readable description of the multi-route
+      const multiRouteReadable = formatMultiRoutePath(
+        multiRouteResult.multiRoute.paths,
+        multiRouteResult.multiRoute.percentages
+      );
+
+      result = {
+        swapPaths: multiRoutePaths,
+        isMultiRoute: true,
+        multiRouteInfo: {
+          percentages: multiRouteResult.multiRoute.percentages,
+          totalOutput: normalizeAmount(
+            multiRouteResult.multiRoute.totalOutput,
+            toDecimals
+          ),
+          pathReadable: multiRouteReadable,
+        },
         exchangeComparison: {
           dedust: bestDedustPath
             ? {
-                outputAmount: bestDedustPath.outputAmount,
+                outputAmount: normalizeAmount(
+                  bestDedustPath.outputAmount,
+                  toDecimals
+                ),
                 pathDepth: bestDedustPath.pathDepth,
               }
             : null,
           stonfiV1: bestStonfiV1Path
             ? {
-                outputAmount: bestStonfiV1Path.outputAmount,
+                outputAmount: normalizeAmount(
+                  bestStonfiV1Path.outputAmount,
+                  toDecimals
+                ),
                 pathDepth: bestStonfiV1Path.pathDepth,
               }
             : null,
           stonfiV2: bestStonfiV2Path
             ? {
-                outputAmount: bestStonfiV2Path.outputAmount,
+                outputAmount: normalizeAmount(
+                  bestStonfiV2Path.outputAmount,
+                  toDecimals
+                ),
                 pathDepth: bestStonfiV2Path.pathDepth,
               }
             : null,
+          bestExchange: "multi-route",
+          requestTimeMs: 0, // Will be updated before response
         },
-      });
+      };
+    } else {
+      // Use the best single path (whether DeDust multi-hop or direct)
+      const bestPath = [bestDedustPath, bestStonfiV1Path, bestStonfiV2Path]
+        .filter(Boolean)
+        .reduce((best, current) => {
+          if (!best) return current;
+          if (!current) return best;
+
+          return BigInt(current.outputAmount) > BigInt(best.outputAmount)
+            ? current
+            : best;
+        }, null);
+
+      if (!bestPath) {
+        return NextResponse.json({
+          error: "No valid swap paths found",
+          swapPaths: [],
+          exchangeComparison: {
+            dedust: bestDedustPath
+              ? {
+                  outputAmount: normalizeAmount(
+                    bestDedustPath.outputAmount,
+                    toDecimals
+                  ),
+                  pathDepth: bestDedustPath.pathDepth,
+                }
+              : null,
+            stonfiV1: bestStonfiV1Path
+              ? {
+                  outputAmount: normalizeAmount(
+                    bestStonfiV1Path.outputAmount,
+                    toDecimals
+                  ),
+                  pathDepth: bestStonfiV1Path.pathDepth,
+                }
+              : null,
+            stonfiV2: bestStonfiV2Path
+              ? {
+                  outputAmount: normalizeAmount(
+                    bestStonfiV2Path.outputAmount,
+                    toDecimals
+                  ),
+                  pathDepth: bestStonfiV2Path.pathDepth,
+                }
+              : null,
+          },
+        });
+      }
+
+      // Format the result
+      const formattedPath = {
+        path: bestPath.path,
+        pathReadable: bestPath.pathReadable,
+        outPutMint: toAddress,
+        pools: bestPath.pools,
+        estimatedOutput: normalizeAmount(bestPath.outputAmount, toDecimals),
+        inputAmount: normalizeAmount(bestPath.inputAmount, actualFromDecimals),
+        minimumAmountOut:
+          Number(normalizeAmount(bestPath.outputAmount, toDecimals)) -
+          Number(normalizeAmount(bestPath.outputAmount, toDecimals)) *
+            slippageDecimal,
+        estimatedGasFees: 0,
+        outPerIn: (
+          Number(normalizeAmount(bestPath.outputAmount, toDecimals)) /
+          Number(normalizeAmount(bestPath.inputAmount, actualFromDecimals))
+        ).toFixed(9),
+        pathDepth: bestPath.pathDepth,
+        source: bestPath.source,
+      };
+
+      result = {
+        swapPaths: [formattedPath],
+        isMultiRoute: false,
+        exchangeComparison: {
+          dedust: bestDedustPath
+            ? {
+                outputAmount: normalizeAmount(
+                  bestDedustPath.outputAmount,
+                  toDecimals
+                ),
+                pathDepth: bestDedustPath.pathDepth,
+              }
+            : null,
+          stonfiV1: bestStonfiV1Path
+            ? {
+                outputAmount: normalizeAmount(
+                  bestStonfiV1Path.outputAmount,
+                  toDecimals
+                ),
+                pathDepth: bestStonfiV1Path.pathDepth,
+              }
+            : null,
+          stonfiV2: bestStonfiV2Path
+            ? {
+                outputAmount: normalizeAmount(
+                  bestStonfiV2Path.outputAmount,
+                  toDecimals
+                ),
+                pathDepth: bestStonfiV2Path.pathDepth,
+              }
+            : null,
+          bestExchange: bestPath.source,
+          requestTimeMs: 0, // Will be updated below
+        },
+      };
     }
 
-    // Format the result
-    const toDecimals = getTokenDecimals(actualToAddress, bestPath.pools);
-
-    const formattedPath = {
-      path: bestPath.path,
-      pathReadable: bestPath.pathReadable,
-      outPutMint: toAddress,
-      pools: bestPath.pools,
-      estimatedOutput: normalizeAmount(bestPath.outputAmount, toDecimals),
-      inputAmount: normalizeAmount(bestPath.inputAmount, actualFromDecimals),
-      minimumAmountOut:
-        Number(normalizeAmount(bestPath.outputAmount, toDecimals)) -
-        Number(normalizeAmount(bestPath.outputAmount, toDecimals)) *
-          slippageDecimal,
-      estimatedGasFees: 0,
-      outPerIn: (
-        Number(normalizeAmount(bestPath.outputAmount, toDecimals)) /
-        Number(normalizeAmount(bestPath.inputAmount, actualFromDecimals))
-      ).toFixed(9),
-      pathDepth: bestPath.pathDepth + 1,
-      source: bestPath.source,
-    };
-
+    // Calculate request time
     const endTime = performance.now();
     const requestTime = Math.round(endTime - startTime);
-    console.log(`Request processed in ${requestTime}ms`);
+    result.exchangeComparison.requestTimeMs = requestTime;
 
-    const result = {
-      swapPaths: [formattedPath],
-      exchangeComparison: {
-        dedust: bestDedustPath
-          ? {
-              outputAmount: normalizeAmount(
-                bestDedustPath.outputAmount,
-                toDecimals
-              ),
-              pathDepth: bestDedustPath.pathDepth,
-            }
-          : null,
-        stonfiV1: bestStonfiV1Path
-          ? {
-              outputAmount: normalizeAmount(
-                bestStonfiV1Path.outputAmount,
-                toDecimals
-              ),
-              pathDepth: bestStonfiV1Path.pathDepth,
-            }
-          : null,
-        stonfiV2: bestStonfiV2Path
-          ? {
-              outputAmount: normalizeAmount(
-                bestStonfiV2Path.outputAmount,
-                toDecimals
-              ),
-              pathDepth: bestStonfiV2Path.pathDepth,
-            }
-          : null,
-        bestExchange: bestPath.source,
-        requestTimeMs: requestTime,
-      },
-    };
-
-    // Cache the path in the background
-    poolService
-      .cachePathResult(
-        actualFromAddress,
-        actualToAddress,
-        preciseAmountWithDecimals,
-        result
-      )
-      .catch((err) => console.error("Error caching path:", err));
+    // Cache the result for future requests
+    await poolService.cachePathResult(
+      actualFromAddress,
+      actualToAddress,
+      preciseAmountWithDecimals,
+      result
+    );
 
     return NextResponse.json(result);
   } catch (error: any) {

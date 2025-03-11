@@ -2806,9 +2806,9 @@ class PoolTracker extends EventEmitter {
         const ratio =
           Math.max(reserve1, reserve2) / Math.min(reserve1, reserve2);
         // Filter out extremely imbalanced pools
-        if (ratio > 500) {
-          return false;
-        }
+        // if (ratio > 2000) {
+        //   return false;
+        // }
       } catch {
         return false;
       }

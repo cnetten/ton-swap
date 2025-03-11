@@ -36,8 +36,10 @@ const isMultiHopSwap = (swapPath) => {
 
 export const SwapInterface = () => {
   const [tonConnectUI] = useTonConnectUI();
-  const [isConnected, setIsConnected] = useState(false);
-  const [address, setAddress] = useState(null);
+  const [isConnected, setIsConnected] = useState(tonConnectUI.connected);
+  const [address, setAddress] = useState(
+    tonConnectUI.wallet?.account.address || null
+  );
   const [isSwapping, setIsSwapping] = useState(false);
   const { theme } = useTheme();
   const { getQuote, isLoading, error } = useQuote();

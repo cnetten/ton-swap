@@ -108,7 +108,7 @@ const TokenAmountInput: React.FC<TokenAmountInputProps> = ({
               )}
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-[425px]">
+          <DialogContent className="sm:max-w-[500px]">
             <DialogTitle>Select a token</DialogTitle>
             <TokenSelector
               onSelect={(selectedToken) => {

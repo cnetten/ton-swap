@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import { StonApiClient } from "@ston-fi/api";
@@ -26,29 +27,70 @@ export const TokenSelector: React.FC<TokenSelectorProps> = ({
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const fetchSwappableTokens = async () => {
+    const fetchTokens = async () => {
       try {
+        // Fetch tokens from STON API
         const client = new StonApiClient();
-
         const searchedAssets = await client.searchAssets({
           searchString: "",
           condition: `${AssetTag.LiquidityHigh} | ${AssetTag.Popular}`,
           walletAddress: walletAddress,
         });
 
-        const availableTokens = searchedAssets;
+        // Fetch tokens from DeDust API
+        const deDustAssets = await getDeDustAssets();
 
-        setTokens(availableTokens);
-        setFilteredTokens(availableTokens);
+        // Convert DeDust assets to Token format
+        const deDustTokens = deDustAssets.map((asset: any) => {
+          return {
+            contractAddress: asset.type === "native" ? "TON" : asset.address,
+            meta: {
+              symbol: asset.symbol,
+              displayName: asset.name,
+              imageUrl: asset.image,
+              decimals: asset.decimals,
+            },
+            // Optional price information if available
+            dexPriceUsd: null,
+          };
+        });
+
+        // Merge tokens, avoiding duplicates by checking contractAddress
+        const mergedTokens = [...searchedAssets];
+
+        deDustTokens.forEach((deDustToken) => {
+          const exists = mergedTokens.some(
+            (token) => token.contractAddress === deDustToken.contractAddress
+          );
+
+          if (!exists) {
+            mergedTokens.push(deDustToken);
+          }
+        });
+
+        setTokens(mergedTokens);
+        setFilteredTokens(mergedTokens);
       } catch (error) {
-        console.error("Error fetching swappable tokens:", error);
+        console.error("Error fetching tokens:", error);
       } finally {
         setIsLoading(false);
       }
     };
 
-    fetchSwappableTokens();
+    fetchTokens();
   }, [walletAddress, currentTokenAddress]);
+
+  const getDeDustAssets = async () => {
+    try {
+      const url = "https://api.dedust.io/v2/assets";
+      const response = await fetch(url);
+      const assets = await response.json();
+      return assets;
+    } catch (error) {
+      console.error("Error fetching DeDust assets:", error);
+      return [];
+    }
+  };
 
   useEffect(() => {
     if (searchQuery && tokens?.length > 0) {
@@ -94,7 +136,7 @@ export const TokenSelector: React.FC<TokenSelectorProps> = ({
                 <Button
                   key={token.contractAddress}
                   variant="ghost"
-                  className={`w-full justify-between items-center p-3 h-auto ${
+                  className={`w-full flex items-center p-3 h-auto ${
                     theme === "dark" ? "hover:bg-zinc-800" : "hover:bg-gray-100"
                   }`}
                   onClick={() => onSelect(token)}
@@ -105,22 +147,23 @@ export const TokenSelector: React.FC<TokenSelectorProps> = ({
                       alt={token.meta.symbol ? token.meta.symbol : ""}
                       width={32}
                       height={32}
-                      className="rounded-full mr-4"
+                      className="rounded-full flex-shrink-0"
                     />
                   )}
 
-                  <div className="w-full flex flex-col items-start">
-                    <span className="w-max font-semibold">
+                  <div className="flex-grow mx-4 min-w-0">
+                    <div className="font-semibold truncate">
                       {token?.meta?.symbol ? token.meta.symbol : ""}
-                    </span>
-                    <span className="text-sm text-gray-500">
+                    </div>
+                    <div className="text-sm text-gray-500 truncate">
                       {token?.meta?.displayName ? token.meta.displayName : ""}
-                    </span>
+                    </div>
                   </div>
+
                   {token.dexPriceUsd && (
-                    <span className="w-max text-sm text-gray-500">
-                      ${parseFloat(token.dexPriceUsd).toFixed(6)}
-                    </span>
+                    <div className="text-sm text-gray-500 flex-shrink-0">
+                      ${parseFloat(token.dexPriceUsd).toFixed(4)}
+                    </div>
                   )}
                 </Button>
               );

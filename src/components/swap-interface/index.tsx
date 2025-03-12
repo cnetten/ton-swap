@@ -632,6 +632,47 @@ export const SwapInterface = () => {
 
         console.log(`Using StonFi ${version} for swap`);
         await prepareStonFiSwap(tonConnectUI, swapPath, version);
+      } else if (state.protocol === "Multi-Route") {
+        console.log("Executing multi-route swap...");
+
+        // Get the paths from the simulation
+        const paths = state.swapPaths;
+        if (!paths || paths.length < 2) {
+          throw new Error("Invalid multi-route configuration");
+        }
+
+        // Execute each path in the multi-route
+        for (let i = 0; i < paths.length; i++) {
+          const path = paths[i];
+          const pathPercentage = path.percentage;
+          console.log(
+            `Executing path ${i + 1}: ${path.source} (${pathPercentage}%)`
+          );
+
+          // Calculate input amount for this path
+          const pathInputAmount = (
+            Number(state.fromAmount) *
+            (pathPercentage / 100)
+          ).toString();
+          console.log(`Path input amount: ${pathInputAmount}`);
+
+          // Create a modified path with adjusted amounts
+          const adjustedPath = {
+            ...path,
+            inputAmount: pathInputAmount,
+          };
+
+          // Use the appropriate protocol handler based on the path source
+          if (path.source === "dedust") {
+            await prepareTonConnectMultiHopSwap(tonConnectUI, adjustedPath);
+          } else if (path.source.includes("stonfi")) {
+            const version = path.source.includes("v1") ? "v1" : "v2";
+            await prepareStonFiSwap(tonConnectUI, adjustedPath, version);
+          } else {
+            console.error("Unknown protocol in multi-route path:", path.source);
+            throw new Error(`Unknown protocol in multi-route: ${path.source}`);
+          }
+        }
       } else {
         console.error("Unknown protocol:", state.protocol);
         throw new Error("Unknown protocol: " + state.protocol);

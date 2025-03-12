@@ -144,14 +144,10 @@ export function areProtocolsCompatible(
   return protocol1 !== protocol2;
 }
 
-/**
- * Find the optimal split between two paths to maximize output
- */
 export function findOptimalSplit(
   path1: PathWithCost | null,
   path2: PathWithCost | null,
-  totalInputAmount: string,
-  numSteps: number = 10
+  totalInputAmount: string
 ): PathSplit {
   // Handle invalid inputs
   if (!path1 && !path2) {
@@ -187,15 +183,17 @@ export function findOptimalSplit(
     };
   }
 
+  // Phase 1: Coarse search with 5% steps
   let bestPath1Percentage = 100;
   let bestPath2Percentage = 0;
   let bestTotalOutput = BigInt(path1.outputAmount);
   let bestPath1Output = path1.outputAmount;
   let bestPath2Output = "0";
 
-  // Try different split ratios
-  for (let i = 0; i <= numSteps; i++) {
-    const path1Percentage = i * (100 / numSteps);
+  // Initial coarse search with 5% steps (21 evaluations)
+  const coarseSteps = 20;
+  for (let i = 0; i <= coarseSteps; i++) {
+    const path1Percentage = i * (100 / coarseSteps);
     const path2Percentage = 100 - path1Percentage;
 
     // Calculate input amounts for each path based on percentages
@@ -230,6 +228,56 @@ export function findOptimalSplit(
       bestPath2Output = path2Output;
     }
   }
+
+  // Phase 2: Fine search around the best result from phase 1
+  // Define search range: +/- 5% around the best result from phase 1
+  const startPercentage = Math.max(0, bestPath1Percentage - 5);
+  const endPercentage = Math.min(100, bestPath1Percentage + 5);
+
+  // Use 1001 steps within this range for ~0.01% precision
+  const fineSteps = 1000;
+  const stepSize = (endPercentage - startPercentage) / fineSteps;
+
+  for (let i = 0; i <= fineSteps; i++) {
+    const path1Percentage = startPercentage + i * stepSize;
+    const path2Percentage = 100 - path1Percentage;
+
+    // Calculate input amounts for each path based on percentages
+    const path1Amount = BigInt(
+      Math.floor(Number(totalInputAmount) * (path1Percentage / 100))
+    ).toString();
+    const path2Amount = BigInt(
+      Math.floor(Number(totalInputAmount) * (path2Percentage / 100))
+    ).toString();
+
+    // Calculate estimated outputs
+    const path1Output = calculateEstimatedOutput(
+      path1,
+      path1Amount,
+      path1.inputAmount
+    );
+    const path2Output = calculateEstimatedOutput(
+      path2,
+      path2Amount,
+      path2.inputAmount
+    );
+
+    // Calculate total output
+    const totalOutput = BigInt(path1Output) + BigInt(path2Output);
+
+    // Update best if this split is better
+    if (totalOutput > bestTotalOutput) {
+      bestTotalOutput = totalOutput;
+      bestPath1Percentage = path1Percentage;
+      bestPath2Percentage = path2Percentage;
+      bestPath1Output = path1Output;
+      bestPath2Output = path2Output;
+    }
+  }
+
+  // Round percentages to 2 decimal places for display purposes
+  bestPath1Percentage = Math.round(bestPath1Percentage * 100) / 100;
+  bestPath2Percentage = Math.round(bestPath2Percentage * 100) / 100;
 
   // Calculate improvement over best single path
   const bestSingleOutput =

@@ -376,7 +376,7 @@ export async function POST(req: Request) {
     // If memory cache is empty, quickly check if we have the "quick" data in Redis
     if (allPools.length === 0) {
       try {
-        const quickDedustData = await tracker.redis.get("quick:dedust");
+        const quickDedustData = await tracker.getFromRedis("quick:dedust");
         // Don't use quick data for StonFi to ensure we get all pools
 
         if (quickDedustData) {

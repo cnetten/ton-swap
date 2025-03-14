@@ -6,7 +6,7 @@
     "dev": "next dev --turbopack",
     "fix-db-records": "ts-node src/app/api/quote/utils/fix-records.ts",
     "build": "next build",
-    "start": "next start",
+    "start": "cross-env NODE_OPTIONS='--max-old-space-size=1536 --expose-gc' next start",
     "lint": "next lint"
   },
   "dependencies": {
@@ -18,11 +18,11 @@
     "@ston-fi/api": "^0.17.0",
     "@ston-fi/omniston-sdk": "^0.3.0",
     "@ston-fi/omniston-sdk-react": "^0.3.2",
-    "@ston-fi/sdk": "^2.2.2",
+    "@ston-fi/sdk": "^2.2.3",
     "@ton/blueprint": "^0.28.0",
-    "@ton/core": "^0.59.1",
+    "@ton/core": "^0.60.1",
     "@ton/crypto": "^3.3.0",
-    "@ton/ton": "^15.1.0",
+    "@ton/ton": "^15.2.1",
     "@tonconnect/ui": "^2.0.11",
     "@tonconnect/ui-react": "^2.0.11",
     "@types/mongodb": "^4.0.7",

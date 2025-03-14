@@ -778,6 +778,16 @@ export async function POST(req: Request) {
     console.error("Error in POST handler:", error);
     const endTime = performance.now();
 
+    if (global.gc) {
+      setTimeout(() => {
+        try {
+          global.gc();
+        } catch (e) {
+          console.log("GC error:", e);
+        }
+      }, 100);
+    }
+
     return NextResponse.json(
       {
         error:

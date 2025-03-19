@@ -139,7 +139,7 @@ class PoolTracker extends EventEmitter {
   // Memory properties
   private memoryUpdateInterval: NodeJS.Timeout | null = null;
   private redisPersistInterval: NodeJS.Timeout | null = null;
-  private readonly MEMORY_UPDATE_SECONDS = 5;
+  private readonly MEMORY_UPDATE_SECONDS = 15;
   private readonly REDIS_PERSIST_MINUTES = 5;
 
   constructor(

@@ -66,10 +66,18 @@ function normalizeAmount(amount: string, decimals: number): string {
   return (Number(amount) / Math.pow(10, decimals)).toFixed(decimals);
 }
 
+let cachedGraph = null;
+let cachedGraphTimestamp = 0;
+
 function buildPoolGraph(filteredPools: Pool[]) {
   const poolGraph = new Map<string, Map<string, number>>();
   const poolsByPair = new Map<string, Pool>();
 
+  const now = Date.now();
+  if (cachedGraph && now - cachedGraphTimestamp < 60000) {
+    // 1 minute cache
+    return cachedGraph;
+  }
   // Initialize the graph with empty maps for each token
   filteredPools.forEach((pool: Pool) => {
     if (!pool.assets || pool.assets.length !== 2) return;
@@ -114,8 +122,9 @@ function buildPoolGraph(filteredPools: Pool[]) {
     poolGraph.get(id2)?.set(id1, 1);
   });
 
-  console.log("Building graph completed. Nodes:", poolGraph.size);
-  return { poolGraph, poolsByPair };
+  cachedGraph = { poolGraph, poolsByPair };
+  cachedGraphTimestamp = now;
+  return cachedGraph;
 }
 
 // Initialize PoolService

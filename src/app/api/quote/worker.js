@@ -344,7 +344,7 @@ function findPathsFromNode(
         })
         .join(" → ");
 
-      // Standard path handling (unchanged)
+      // Standard path handling
       allPaths.push({
         path: [...currentPath],
         pathReadable: readablePath,
@@ -399,7 +399,7 @@ if (parentPort) {
 
   // Then find multi-hop paths (only for non-StonFi protocols)
   const allPaths = [];
-  
+
   if (directPath) {
     allPaths.push(directPath);
   }
@@ -418,19 +418,49 @@ if (parentPort) {
       allPaths.push(...paths);
     }
   } else {
-    console.log("StonFi protocol: Only using direct path, skipping multi-hop search");
+    console.log(
+      "StonFi protocol: Only using direct path, skipping multi-hop search"
+    );
   }
 
   // Sort by output amount and prefer shorter paths when outputs are similar
   allPaths.sort((a, b) => {
     if (a.outputAmount.startsWith("-")) return 1;
     if (b.outputAmount.startsWith("-")) return -1;
-    const outputDiff = Number(b.outputAmount) - Number(a.outputAmount);
-    // If outputs are within 1% of each other, prefer shorter path
-    if (Math.abs(outputDiff) < Number(b.outputAmount) * 0.01) {
-      return a.path.length - b.path.length;
+
+    // Compare output amounts as BigInt for precise comparison
+    const outputA = BigInt(a.outputAmount);
+    const outputB = BigInt(b.outputAmount);
+
+    // Calculate the path depths
+    const depthA = a.path.length - 1;
+    const depthB = b.path.length - 1;
+
+    // STRONG PREFERENCE FOR DIRECT PATHS:
+    // If a is a direct path and b is not, prefer a unless b offers at least 5% better output
+    if (depthA === 1 && depthB > 1) {
+      // Only choose the multi-hop path if it offers at least 5% better output
+      return outputB * BigInt(100) > outputA * BigInt(105) ? 1 : -1;
     }
-    return outputDiff;
+
+    // If b is a direct path and a is not, prefer b unless a offers at least 5% better output
+    if (depthB === 1 && depthA > 1) {
+      // Only choose the multi-hop path if it offers at least 5% better output
+      return outputA * BigInt(100) > outputB * BigInt(105) ? -1 : 1;
+    }
+
+    // For paths of the same type (both direct or both multi-hop):
+
+    // If outputs are within 1% of each other, prefer shorter path
+    if (
+      outputA * BigInt(101) > outputB * BigInt(100) &&
+      outputB * BigInt(101) > outputA * BigInt(100)
+    ) {
+      return depthA - depthB;
+    }
+
+    // Otherwise, prefer the path with the higher output
+    return outputB > outputA ? 1 : -1;
   });
 
   // Filter out negative or zero output paths

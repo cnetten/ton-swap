@@ -158,6 +158,11 @@ class PoolTracker extends EventEmitter {
       console.error("Redis client error:", err);
       this.isRedisConnected = false;
 
+      // Log the error but don't block application functionality
+      console.log(
+        "Application will continue without Redis - using in-memory cache only"
+      );
+
       // Try to reconnect after a delay if not already reconnecting
       if (!this.redisConnectionPromise) {
         setTimeout(() => {
@@ -227,17 +232,21 @@ class PoolTracker extends EventEmitter {
   // Redis helper methods
   public async getFromRedis(key: string): Promise<any> {
     try {
-      await this.ensureRedisConnection();
-      const value = await this.redisClient.get(key);
-      if (value === null) return null;
+      // Only attempt Redis operations if connected
+      if (this.isRedisConnected) {
+        const value = await this.redisClient.get(key);
+        if (value === null) return null;
 
-      try {
-        // Try to parse JSON
-        return JSON.parse(value);
-      } catch {
-        // Return as is if not JSON
-        return value;
+        try {
+          // Try to parse JSON
+          return JSON.parse(value);
+        } catch {
+          // Return as is if not JSON
+          return value;
+        }
       }
+      // If Redis is not connected, return null without error
+      return null;
     } catch (error) {
       console.error(`Redis get error for key ${key}:`, error);
       return null;

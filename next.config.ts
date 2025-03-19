@@ -29,7 +29,6 @@ const nextConfig: NextConfig = {
   reactStrictMode: false,
   experimental: {
     optimizeCss: true,
-    esmExternals: "loose",
     // Removing the incompatible outputFileTracingExcludes property
   },
   poweredByHeader: false, // Small security/performance improvement

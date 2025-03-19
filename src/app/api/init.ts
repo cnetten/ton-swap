@@ -20,7 +20,7 @@ export async function initializePoolService() {
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(
         () => reject(new Error("Pool service initialization timed out")),
-        12000
+        30000
       );
     });
 
